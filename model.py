@@ -131,10 +131,9 @@ class ModelBase(Module):
         # len of training and validation based in maximun length given
         n_total = len(data)
         if self.max_len_train is not None:
-            n_train = self.max_len_train
-            n_train = min(n_train, n_total)
+            n_train = min(self.max_len_train, n_total)
         else:
-            # por ejemplo, 90% train / 10% val
+            #por ejemplo, 90% train / 10% val
             n_train = int(0.9 * n_total)
 
         n_val = n_total - n_train
@@ -159,8 +158,7 @@ class ModelBase(Module):
         val_dataloader = DataLoader(
             val_data,
             batch_size=self.batch_size,
-            shuffle=True,
-            generator=g)
+            shuffle=False)
 
         return (train_dataloader, val_dataloader)
             
@@ -595,31 +593,22 @@ class ModelBase(Module):
             >>> test_loader = self._get_test_dataloaders()
         """
 
-        test_data = LoDoPaBDataset(self.test_path, 
-        self.vg, 
-        self.angles, 
-        self.pg, 
-        self.A, 
-        self.single_bp,
-        self.n_single_BP, 
-        self.sparse_view, 
-        self.view_angles,
-        self.current_indices,
-        self.alpha,  
-        self.i_0, 
-        self.sigma, 
-        self.seed, 
-        self.max_len_test, 
-        False, 
-        self.dataset_logger,
-        self.accelerator.device)
-
-        test_dataloader = DataLoader(test_data, 
-        batch_size=self.batch_size, 
-        shuffle=False, 
-        num_workers=0,
-        pin_memory=True
-        ) 
+        test_data = MnistDataset(training = False,
+                testing= True, 
+                A = self.A, 
+                dimension = self.dimension, 
+                num_angles = self.num_angles, 
+                sigma = self.sigma,
+                standard_dose = self.standard_dose,
+                cut = self.cut,
+                seed = self.seed,
+                max_len = self.max_len_test,
+                device = self.device)
+        
+        test_dataloader = DataLoader(
+                test_data,
+                batch_size=self.batch_size,
+                shuffle=False)
 
         return test_dataloader
 
