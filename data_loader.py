@@ -10,50 +10,77 @@ import torch
 MNIST CT Dataset — Parallel-Beam Tomography
 ------------------------------------------
 
-This dataset generates simple CT phantoms using MNIST digits:
+This dataset generates simple 2D CT phantoms from MNIST digits and simulates
+their parallel-beam projections with realistic noise:
 
-1. Loads MNIST digits (train or test).
-2. Embeds each digit inside a larger blank canvas to produce a 2D phantom.
-3. Applies random translations so digits appear in different positions.
-4. Builds a parallel-beam CT geometry using tomosipo:
-       - Volume geometry (vg)
-       - Parallel-beam projection geometry (pg)
-       - Ray transform operator A
-5. Computes sinograms by applying A(im_prim).
-6. Supports Poisson + Gaussian realistic CT noise.
-7. Returns:
-       (noisy sinogram, ground-truth image, MNIST label, digit center)
+1. Loads MNIST digits (train or test split).
+2. Embeds each digit in a larger zero-padded canvas to form a 2D phantom.
+3. Applies random translations so digits appear at different positions.
+   - Optionally allows the digit to be partially outside the canvas (`cut=True`).
+4. Uses an external tomosipo operator `A` to compute parallel-beam sinograms.
+5. Adds Poisson (photon counting) + Gaussian (detector) noise to the sinograms.
+6. Returns a dictionary with:
+       - noisy_sinogram: noisy projection data
+       - ground_truth_image: clean padded MNIST phantom
+       - label: original MNIST class (0–9)
+       - center: digit center coordinates in the canvas
 
 """
 
 class MnistDataset(Dataset):
 
-    def __init__(self, training=True, testing=False, dimension=(50, 50), num_angles=60, sigma = 0.1, standard_dose = True, seed = 29072000, max_len = None,  device="cuda"):
+    def __init__(self, training, testing, A, dimension=(50, 50), num_angles=60, sigma = 0.1, standard_dose = True, cut = False,  seed = 29072000, max_len = None,  device="cuda"):
         """
-        Initialize the MNIST CT dataset, load data, and build CT geometry.
+        Initialize the MNIST CT dataset.
 
-        Parameters:
-            training (bool):
-                If True, use the MNIST training split.
-            testing (bool):
-                If True, use the MNIST test split.
-            dimension (tuple[int, int]):
-                Size (H, W) of the padded image / volume grid.
-            num_angles (int):
-                Number of projection angles for CT acquisition.
-            sigma (float):
-                Standard deviation of the Gaussian detector noise.
-            standard_dose (bool):
-                If True, uses standard dose I0 = 1e5; otherwise reduced dose.
-            seed (int):
-                Base random seed used for reproducible noise and translations.
-            max_len (int or None):
-                Optional cap on the number of samples exposed by the dataset.
-            device (str):
-                Device string (e.g. "cpu" or "cuda") used for generators/tensors.
+        Parameters
+        ----------
+        training : bool
+            If True, use the MNIST training split.
+        testing : bool
+            If True, use the MNIST test split.
+            Exactly one of (training, testing) must be True.
+        A : tomosipo.Operator
+            Tomosipo forward operator implementing the ray transform
+            (e.g. parallel-beam projections) that maps images -> sinograms.
+            It is assumed to be compatible with tensors living on `device`.
+        dimension : tuple[int, int], optional
+            Spatial size (H, W) of the padded phantom image.
+            The MNIST digit is embedded into a canvas of this size.
+        num_angles : int, optional
+            Number of projection angles used by the CT geometry.
+            (Stored for bookkeeping; the geometry is encoded in `A`.)
+        sigma : float, optional
+            Standard deviation of the additive Gaussian detector noise
+            applied on top of the Poisson log-domain sinogram.
+        standard_dose : bool, optional
+            If True, use a standard incident photon count I0 = 1e5.
+            If False, reduce dose (currently I0 / 4).
+        cut : bool, optional
+            Controls whether the MNIST digit is always fully contained
+            in the canvas or allowed to be partially cut off:
+            - False: top-left corner is restricted so that the whole digit
+              lies inside the (H, W) canvas (no cropping).
+            - True: the top-left corner is sampled anywhere in the canvas,
+              so parts of the digit may fall outside and be cropped.
+        seed : int, optional
+            Base random seed (currently not used inside the class; global
+            seeding is expected to be handled outside for reproducibility).
+        max_len : int or None, optional
+            If not None, cap the dataset length to `max_len` samples.
+        device : str or torch.device, optional
+            Target device for tensors produced by the dataset
+            (e.g. "cuda", "cuda:0", or "cpu").
         """
         self.training = training
         self.testing = testing
+
+        if self.training and self.testing:
+            raise ValueError(
+                "You cannot be training and testing with the same dataset. "
+                "Set exactly one of (training, testing) to True."
+            )
+        
         self.dimension = dimension
         self.H, self.W = self.dimension
         self.num_angles = num_angles
@@ -63,9 +90,11 @@ class MnistDataset(Dataset):
             self.i_0 = 10**5
         else:
             self.i_0 = 10**5/4
+
+        self.cut = cut
         self.seed = seed
         self.max_len = max_len
-        self.device = device
+        self.device = torch.device(device)
 
         #load mnist dataset 
         transform = transforms.ToTensor()
@@ -75,12 +104,8 @@ class MnistDataset(Dataset):
         elif self.testing:
             self.data = MNIST(root="data", train=False, download=True, transform=transform)
 
-
         # Create tomosipo volume and projection geometry
-        self.vg = ts.volume(shape=(1,self.H,self.W))                                                       # Volumen
-        self.angles = np.linspace(0, np.pi, self.num_angles, endpoint=True)                                # Angles
-        self.pg = ts.parallel(angles=self.angles, shape=(1, self.H))                                       # Parallel beam structure
-        self.A = ts.operator(self.vg,self.pg)     
+        self.A = A   
 
     
     def __len__(self):
@@ -147,7 +172,7 @@ class MnistDataset(Dataset):
         return norm_tensor * max_val  
     
     
-    def noise(self, sinogram, idx):
+    def noise(self, sinogram):
         """
         Add realistic Poisson + Gaussian noise to a sinogram.
 
@@ -168,11 +193,9 @@ class MnistDataset(Dataset):
         # Nomalised sinogram between [0,1] to add noise
         norm_sino,  max_val =  self.max_normalize(sinogram)
 
-        #Initilizing seed generator for reproducibility porpuses (this is for having more than one coworkers)
-        generator = torch.Generator(device=sinogram.device).manual_seed(self.seed + idx)
-
+       
         # Simulate measured photons using Poisson noise (counting error)
-        measured_photons = torch.poisson(self.i_0 * torch.exp(-norm_sino), generator=generator)
+        measured_photons = torch.poisson(self.i_0 * torch.exp(-norm_sino))
 
         # Avoid log(0) by setting the minimum to 1
         measured_photons = torch.clamp(measured_photons, min=1.0)
@@ -195,7 +218,7 @@ class MnistDataset(Dataset):
 
         return noisy_sinogram
     
-    def padding_and_translation(self,img, idx):
+    def padding_and_translation(self,img):
         """
         Embed a MNIST digit into a larger zero-padded canvas with translation.
 
@@ -216,22 +239,32 @@ class MnistDataset(Dataset):
         _, h, w = img.shape
 
         #creating 0 image 
-        im_prim = torch.zeros((1, self.H, self.W))
+        im_prim = torch.zeros((1, self.H, self.W), device=self.device)
 
-        # make translation reproducible by using idx
-        g = torch.Generator(device=self.device)
-        g.manual_seed(self.seed + idx)
-
-        # poistion of the top-left corner of mnist
-        x = torch.randint(0, self.H - h + 1, (1,), generator=g).item()
-        y = torch.randint(0, self.W - w + 1, (1,), generator=g).item()
+        ###### ESTO ESTA SIN IMPLEMENTAR #####
+        if self.cut:
+            # poistion of the top-left corner of mnist
+            x = torch.randint(0, self.H, (1,)).item()
+            y = torch.randint(0, self.W, (1,)).item()
 
 
-        #place the mnist number on the new image
-        im_prim[:, x:x+h, y:y+w] = img
+            #place the mnist number on the new image
+            im_prim[:, x:x+h, y:y+w] = img
 
-        #calculate the coordinates of the mnist image on the new canvas
-        center = (x+round(h/2),y+round(w/2))
+            #calculate the coordinates of the mnist image on the new canvas
+            center = (x+round(h/2),y+round(w/2))
+
+        else: 
+            # poistion of the top-left corner of mnist
+            x = torch.randint(0, self.H - h + 1, (1,)).item()
+            y = torch.randint(0, self.W - w + 1, (1,)).item()
+
+
+            #place the mnist number on the new image
+            im_prim[:, x:x+h, y:y+w] = img
+
+            #calculate the coordinates of the mnist image on the new canvas
+            center = (x+round(h/2),y+round(w/2))
 
         return center,im_prim
     
@@ -259,13 +292,17 @@ class MnistDataset(Dataset):
         img, label = self.data[idx]
 
         #padding and translation
-        center, im_prim = self.padding_and_translation(img, idx)
+        center, im_prim = self.padding_and_translation(img)
 
         #sinogram
         sinogram = self.A(im_prim)
 
         # adding noise
-        noisy_sino = self.noise(sinogram, idx)
+        noisy_sino = self.noise(sinogram)
 
-        return noisy_sino, im_prim, label, center
+        return {'noisy_sinogram': noisy_sino,  
+            'ground_truth_image': im_prim,
+            'label': label,
+            'center':center}
+    
 
