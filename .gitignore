@@ -83,6 +83,8 @@ StyleCopReport.xml
 # Files built by Visual Studio
 *.png 
 *.jpg 
+*.pt 
+*.json 
 *_i.c
 *_p.c
 *_h.h
