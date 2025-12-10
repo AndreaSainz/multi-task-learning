@@ -16,7 +16,7 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 
 #parameter values
-batch_size = 1
+batch_size = 10
 training = True
 testing = False
 H = 100
@@ -26,7 +26,7 @@ num_angles = 30
 sigma = 0.01
 standard_dose = True
 cut = False
-max_len = 2
+max_len = 20
 device = torch.device("cuda:0")
 
 
@@ -46,25 +46,29 @@ train_dataloader = DataLoader(
     shuffle=True,
     generator=g)
 
-for epoch in range(3):
+for epoch in range(1):
     print(f"\n=== EPOCH {epoch} ===")
     for batch_id, batch in enumerate(train_dataloader):
-        plt.imshow(batch["noisy_sinogram"][0].squeeze().cpu().numpy(), cmap="gray")
-        plt.title(f"Sinogram {batch_id} epoch {epoch} Try 1")
-        plt.savefig(f"sinogram_batch_{batch_id}_epoch_{epoch}_try1_30.png")
+        print("label shape:", batch["label"].shape)
+        print("first labels:", batch["label"][:8])
 
-        plt.imshow(A.T(batch["noisy_sinogram"][0])[0].squeeze().cpu().numpy())
-        plt.title(f" reconstructed Image {batch_id} epoch {epoch} Try 1")
-        plt.savefig(f"reconstructed_image_batch_{batch_id}_epoch_{epoch}_try1_30.png")
+        #plt.imshow(batch["noisy_sinogram"][0].squeeze().cpu().numpy(), cmap="gray")
+        #plt.title(f"Sinogram {batch_id} epoch {epoch} Try 1")
+        #plt.savefig(f"sinogram_batch_{batch_id}_epoch_{epoch}_try1_30.png")
 
-        plt.imshow(batch["ground_truth_image"][0].squeeze().cpu().numpy())
-        plt.title(f"Image {batch_id} epoch {epoch} try 1")
-        plt.savefig(f"Image_batch_{batch_id}_epoch_{epoch}_try1_30.png")
+        #plt.imshow(A.T(batch["noisy_sinogram"][0])[0].squeeze().cpu().numpy())
+        #plt.title(f" reconstructed Image {batch_id} epoch {epoch} Try 1")
+        #plt.savefig(f"reconstructed_image_batch_{batch_id}_epoch_{epoch}_try1_30.png")
+
+        #plt.imshow(batch["ground_truth_image"][0].squeeze().cpu().numpy())
+        #plt.title(f"Image {batch_id} epoch {epoch} try 1")
+        #plt.savefig(f"Image_batch_{batch_id}_epoch_{epoch}_try1_30.png")
 
         noisy = batch["noisy_sinogram"][0]          # quitamos dim de batch
         center = batch["center"][0]                 # primer (y único) centro
-
+        label = batch["label"]
         print(
             f"Call 1: center={center}, "
+            f"label={label}"
             f"first_pixel_sino={noisy.view(-1)[0].item():.6f}"
         )
