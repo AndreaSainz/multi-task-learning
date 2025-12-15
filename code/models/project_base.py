@@ -1,16 +1,15 @@
 import tomosipo as ts
 import torch
-from torch.nn import MSELoss, L1Loss, CrossEntropyLoss, Module
+from torch.nn import MSELoss, CrossEntropyLoss, Module
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from data_loader import MnistDataset
+from dataloader.data_loader import MnistDataset
+from utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
 from torch.utils.data import DataLoader, random_split
-import time
 from tqdm import tqdm
 import json
 import random
 import numpy as np
-import os
 import gc
 import pandas as pd
 import matplotlib
@@ -40,6 +39,7 @@ class ModelBase(Module):
     
 
         # model parameters
+        self.num_classes = 10
         self.model_path = model_path
         self.batch_size = batch_size
         self.dimension = dimension
@@ -121,7 +121,7 @@ class ModelBase(Module):
             n_val = min(self.max_len_val, n_val_t)
         else:
             #por ejemplo, 90% train / 10% val
-            n_train = n_val_t
+            n_val = n_val_t
 
         #split in training and validation
         n_rest = n_total - (n_train + n_val)
@@ -177,9 +177,6 @@ class ModelBase(Module):
         return test_dataloader
 
 
-
-
-
     def train_one_epoch(self, train_dataloader, opt1, opt2, opt3, loss1, loss2, loss3, e):
 
         # set the model in training mode
@@ -198,9 +195,9 @@ class ModelBase(Module):
 
             # send the input to the device
             ground_truth_1 = batch["ground_truth_image"]
-            print(f"Ground Truth Image Shape: {ground_truth_1.shape}")
+            #print(f"Ground Truth Image Shape: {ground_truth_1.shape}")
             ground_truth_2 = batch["label"]
-            ground_truth_3 = batch["center"]
+            ground_truth_3 = batch["centre"]
             input_data = batch["noisy_sinogram"]
 
 
@@ -209,22 +206,29 @@ class ModelBase(Module):
             pred_1 = self.model1(input_data)
             loss_value_1 = loss1(pred_1, ground_truth_1)
 
-            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-            axes[0].imshow(input_data[0, 0].detach().cpu().numpy(), cmap="gray")
-            axes[0].set_title("Sinograma")
+            # fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+            # img0 = input_data[0, 0].detach().cpu().numpy()
+            # im0 = axes[0].imshow(img0, cmap="gray")
+            # axes[0].set_title("Sinograma")
+            # axes[0].axis("off")
+            # fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
 
-            axes[1].imshow(pred_1[0, 0].detach().cpu().numpy(), cmap="gray")
-            axes[1].set_title("Reconstrucción pred_1")
+            # img1 = pred_1[0, 0].detach().cpu().numpy()
+            # im1 = axes[1].imshow(img1, cmap="gray")
+            # axes[1].set_title("Reconstrucción pred_1")
+            # axes[1].axis("off")
+            # fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
-            axes[2].imshow(ground_truth_1[0, 0].detach().cpu().numpy(), cmap="gray")
-            axes[2].set_title("Ground truth")
+            # img2 = ground_truth_1[0, 0].detach().cpu().numpy()
+            # im2 = axes[2].imshow(img2, cmap="gray")
+            # axes[2].set_title("Ground truth")
+            # axes[2].axis("off")
+            # fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
 
-            for ax in axes:
-                ax.axis("off")
 
-            plt.tight_layout()
-            plt.savefig(f"debug_epoch{e}_batch{batch_id}.png")
-            plt.close(fig)
+            # plt.tight_layout()
+            # plt.savefig(f"debug_epoch{e}_batch{batch_id}.png")
+            # plt.close(fig)
 
 
             # doing simultanious tasks
@@ -233,22 +237,22 @@ class ModelBase(Module):
             pred_2 = self.model2(pred_1_detached)
             loss_value_2 = loss2(pred_2, ground_truth_2)
 
-            print(f"Original label: {ground_truth_2}, Predicted label = {pred_2}")
+            #print(f"Original label: {ground_truth_2}, Predicted label = {pred_2}")
 
             # find the center
             pred_3 = self.model3(pred_1_detached)
-            pred_center = pred_3.round().long()  # cause they are pixel positions
-            loss_value_3 = loss3(pred_center, ground_truth_3)
+            loss_value_3 = loss3(pred_3, ground_truth_3)
 
-            print(f"Original center: {ground_truth_3}, Predicted center = {pred_center}")
+            #print(f"Original center: {ground_truth_3}, Predicted center = {pred_3}")
 
             # checking that predictions and ground truth images have same shape
             assert ground_truth_1.shape == pred_1_detached.shape, f"[ERROR] Shape mismatch: predicted {pred_1_detached.shape}, ground truth {ground_truth_1.shape}"
 
             # zero out the gradients, perform the backpropagation step, and update the weights
-            opt1.zero_grad()
-            self.accelerator.backward(loss_value_1)
-            opt1.step()
+            # Model 1 is just a SIRT so it does not train
+                                                                #opt1.zero_grad()
+                                                                #self.accelerator.backward(loss_value_1)
+                                                                #opt1.step()
 
             opt2.zero_grad()
             self.accelerator.backward(loss_value_2)
@@ -294,6 +298,8 @@ class ModelBase(Module):
             total_val_loss_2 = 0
             total_val_loss_3 = 0
             
+            #initlize metrics
+            state, metrics_cfg = self._init_metric_state()
 
             # loop over the validation set
             for batch_id, batch in enumerate(tqdm(val_dataloader, desc=f"Validation Epoch {e+1}", leave=False)):
@@ -301,23 +307,32 @@ class ModelBase(Module):
                 # send the input to the device
                 ground_truth_1 = batch["ground_truth_image"]
                 ground_truth_2 = batch["label"]
-                ground_truth_3 = batch["center"]
+                ground_truth_3 = batch["centre"]
                 input_data = batch["noisy_sinogram"]
                 
                 # make the predictions and calculate the validation loss
                 pred_1 = self.model1(input_data)
                 loss_value_1 = loss1(pred_1, ground_truth_1)
+                pred_1_detached = pred_1.detach()
 
                 # doing simultanious tasks
                 # classifier
-                pred_2 = self.model2(pred_1)
+                pred_2 = self.model2(pred_1_detached)
                 loss_value_2 = loss2(pred_2, ground_truth_2)
 
-                # find the center
-                pred_3 = self.model3(pred_1)
+                # find the centre
+                pred_3 = self.model3(pred_1_detached)
                 loss_value_3 = loss3(pred_3, ground_truth_3)
 
-
+                #update metrics
+                self._update_metrics_state(
+                    state, metrics_cfg,
+                    pred_1, ground_truth_1,
+                    pred_2, ground_truth_2,
+                    pred_3, ground_truth_3,
+                    data_range=1.0
+                )
+                
                 # add the loss to the total validation loss so far
                 total_val_loss_1 += loss_value_1.item()
                 total_val_loss_2 += loss_value_2.item()
@@ -338,7 +353,8 @@ class ModelBase(Module):
                     elif torch.backends.mps.is_available():
                         torch.mps.empty_cache()
         
-        return total_val_loss_1, total_val_loss_2, total_val_loss_3
+        val_metrics = self._finalize_metrics_state(state, metrics_cfg)
+        return total_val_loss_1, total_val_loss_2, total_val_loss_3, val_metrics
 
         
 
@@ -358,7 +374,7 @@ class ModelBase(Module):
         # load training and validation datasets
         train_dataloader, val_dataloader = self._get_dataloaders()
 
-        # show model summary
+        # send models to device
         self.model1.to(self.device)
         self.model2.to(self.device)
         self.model3.to(self.device)
@@ -456,7 +472,8 @@ class ModelBase(Module):
             total_train_loss_1, total_train_loss_2, total_train_loss_3 = self.train_one_epoch(train_dataloader, opt1, opt2, opt3, loss1, loss2, loss3, e)
 
             # call the validation function
-            total_val_loss_1, total_val_loss_2, total_val_loss_3 = self.validation(val_dataloader, loss1, loss2, loss3, e)
+            total_val_loss_1, total_val_loss_2, total_val_loss_3, val_metrics = self.validation(val_dataloader, loss1, loss2, loss3, e)
+            history.setdefault("val_metrics", []).append(val_metrics)
 
             # update our training history
             avg_train_loss_1 = total_train_loss_1 / len(train_dataloader)
@@ -493,7 +510,7 @@ class ModelBase(Module):
                 "CLASSIFIER MODEL": "",
                 "train_loss_2": f"{avg_train_loss_2:.6f}",
                 "val_loss_2": f"{avg_val_loss_2:.6f}",
-                "CENTER FINDER MODEL": "",
+                "CENTRE FINDER MODEL": "",
                 "train_loss_3": f"{avg_train_loss_3:.6f}",
                 "val_loss_3": f"{avg_val_loss_3:.6f}"
             })
@@ -522,7 +539,7 @@ class ModelBase(Module):
         gt_images = []
         img_pred = []
         label_pred = []
-        center_pred = []
+        centre_pred = []
         sinograms = []
 
         # switch off autograd for evaluation
@@ -538,12 +555,15 @@ class ModelBase(Module):
             total_test_loss_2 = 0
             total_test_loss_3 = 0
 
+            #initilize metrics
+            state, metrics_cfg = self._init_metric_state()
+
             # loop over the validation set
             for batch_id, batch in enumerate(tqdm(test_dataloader)):
                 # send the input to the device
                 ground_truth_1 = batch["ground_truth_image"]
                 ground_truth_2 = batch["label"]
-                ground_truth_3 = batch["center"]
+                ground_truth_3 = batch["centre"]
                 input_data = batch["noisy_sinogram"]
 
                 
@@ -561,7 +581,15 @@ class ModelBase(Module):
                 pred_3 = self.model3(pred_1)
                 loss_value_3 = loss3(pred_3, ground_truth_3)
 
-
+                #update metrics
+                self._update_metrics_state(
+                    state, metrics_cfg,
+                    pred_1, ground_truth_1,
+                    pred_2, ground_truth_2,
+                    pred_3, ground_truth_3,
+                    data_range=1.0
+                )
+                
                 # add the loss to the total validation loss so far
                 total_test_loss_1 += loss_value_1.item()
                 total_test_loss_2 += loss_value_2.item()
@@ -570,12 +598,10 @@ class ModelBase(Module):
                 # checking that predictions and ground truth images have same shape
                 assert ground_truth_1.shape == pred_1.shape, f"[ERROR] Shape mismatch: predicted {pred_1.shape}, ground truth {ground_truth_1.shape}"
 
-                
-
                 # save gound truth and prediction
                 img_pred.append(pred_1.cpu())
                 label_pred.append(pred_2.cpu())
-                center_pred.append(pred_3.cpu())
+                centre_pred.append(pred_3.cpu())
                 gt_images.append(ground_truth_1.cpu())
                 sinograms.append(input_data.cpu())
 
@@ -590,7 +616,8 @@ class ModelBase(Module):
                     elif torch.backends.mps.is_available():
                         torch.mps.empty_cache()
         
-        return img_pred, label_pred, center_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3
+        test_metrics = self._finalize_metrics_state(state, metrics_cfg)
+        return img_pred, label_pred, centre_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics
 
 
     def test(self, test_path, max_len_test=None,):
@@ -618,7 +645,7 @@ class ModelBase(Module):
         
 
         # call evaliation function
-        img_pred, label_pred, center_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3 = self.evaluate(test_dataloader, loss1, loss2, loss3)
+        img_pred, label_pred, centre_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics = self.evaluate(test_dataloader, loss1, loss2, loss3)
     
         # training history
         avg_test_loss_1 = total_test_loss_1 / len(test_dataloader)
@@ -629,13 +656,14 @@ class ModelBase(Module):
         results = {
             "test_loss_1": avg_test_loss_1,
             "test_loss_2": avg_test_loss_2,
-            "test_loss_3": avg_test_loss_3
+            "test_loss_3": avg_test_loss_3,
+            "metrics": test_metrics
         }
 
         # save predictions and ground truth
         torch.save(torch.cat(img_pred), f"{self.model_path}_predictions_images.pt")
         torch.save(torch.cat(label_pred), f"{self.model_path}_predictions_labels.pt")
-        torch.save(torch.cat(center_pred), f"{self.model_path}_predictions_centers.pt")
+        torch.save(torch.cat(centre_pred), f"{self.model_path}_predictions_centers.pt")
         torch.save(torch.cat(gt_images), f"{self.model_path}_ground_truth_images.pt")
         torch.save(torch.cat(sinograms), f"{self.model_path}_noisy_sinograms.pt")
 
@@ -644,3 +672,89 @@ class ModelBase(Module):
             json.dump(results, f)
 
         return results
+    
+
+
+
+
+
+    ############################################################################ Metrics for batch ############################################################################
+
+    def _init_metric_state(self):
+        """
+        Creates per-epoch metric state (running sums / confusion matrices).
+        Returns:
+            state, metrics_cfg
+        """
+        metrics_cfg = {
+            "model1": ["psnr", "ssim"],          # CT recon
+            "model2": ["classifier_metrics"],    # classifier
+            "model3": ["mse"],                   # center regression
+        }
+
+        state = {
+            "model1": {"n_batches": 0, "psnr": 0.0, "ssim": 0.0},
+            "model2": {"n_batches": 0, "cm": torch.zeros(self.num_classes, self.num_classes, device=self.device, dtype=torch.int64)},
+            "model3": {"n_batches": 0, "mse": 0.0},
+        }
+
+        return state, metrics_cfg
+
+    def _update_metrics_state(self, state, metrics_cfg, pred_1, gt_1, pred_2, gt_2, pred_3, gt_3, data_range=1.0):
+        """
+        Updates metric accumulators for a batch.
+        """
+        # model1 metrics (CT recon)
+        if "model1" in metrics_cfg:
+            for m in metrics_cfg["model1"]:
+                if m == "psnr":
+                    state["model1"]["psnr"] += compute_psnr_results(pred_1, gt_1, max_val=data_range)
+                elif m == "ssim":
+                    state["model1"]["ssim"] += compute_ssim(pred_1, gt_1, data_range=data_range)
+            state["model1"]["n_batches"] += 1
+
+        # model2 metrics (classifier)
+        if "model2" in metrics_cfg:
+            for m in metrics_cfg["model2"]:
+                if m == "classifier_metrics":
+                    # accumulate confusion matrix on-device
+                    state["model2"]["cm"] = update_confusion_matrix(state["model2"]["cm"], pred_2, gt_2, num_classes=self.num_classes)
+            state["model2"]["n_batches"] += 1
+
+        # model3 metrics (center regression)
+        if "model3" in metrics_cfg:
+            for m in metrics_cfg["model3"]:
+                if m == "mse":
+                    state["model3"]["mse"] += compute_mse(pred_3, gt_3)
+            state["model3"]["n_batches"] += 1
+
+
+    def _finalize_metrics_state(self, state, metrics_cfg):
+        """
+        Converts accumulators into final metrics dict (means + classifier metrics).
+        """
+        results = {}
+
+        # model1 mean metrics
+        if "model1" in metrics_cfg:
+            nb = max(1, state["model1"]["n_batches"])
+            results["model1"] = {}
+            for m in metrics_cfg["model1"]:
+                results["model1"][m] = state["model1"][m] / nb
+
+        # model2 from confusion matrix
+        if "model2" in metrics_cfg:
+            results["model2"] = {}
+            for m in metrics_cfg["model2"]:
+                if m == "classifier_metrics":
+                    results["model2"].update(metrics_from_confusion_matrix(state["model2"]["cm"].detach().cpu()))
+
+        # model3 mean metrics
+        if "model3" in metrics_cfg:
+            nb = max(1, state["model3"]["n_batches"])
+            results["model3"] = {}
+            for m in metrics_cfg["model3"]:
+                results["model3"][m] = state["model3"][m] / nb
+
+        return results
+        

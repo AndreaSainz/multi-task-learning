@@ -14,12 +14,12 @@ accelerator = Accelerator()
 
 
 #parameter values
-batch_size = 1
-epochs = 3
+batch_size = 10
+epochs = 20
 H = 100
 W = 100
 dimension = (H, W)
-num_angles = 30
+num_angles = 60
 sigma = 0.01
 standard_dose = True
 cut = False
@@ -29,10 +29,10 @@ optimizer_type = ("SGD", "SGD", "SGD")
 learning_rate = (1e-3, 1e-3, 1e-3)
 scheduler = (True, True, True) 
 
-save_path = "/home/as3628/multi-task-learning/results"
+save_path = "/home/as3628/multi-task-learning/results/"
 
 # Create tomosipo volume and projection geometry
-vg = ts.volume(shape=(1,H,W))                                                       # Volumen
+vg = ts.volume(shape=(1,H,W))                                                       # Volume
 angles = np.linspace(0, np.pi, num_angles, endpoint=True)                           # Angles
 pg = ts.parallel(angles=angles, shape=(1, H))                                       # Parallel beam structure
 A = ts.operator(vg,pg)     
@@ -55,16 +55,16 @@ exp = ModelBase(
 )
 
 
-exp.model1 = ReconNet(A, H, W)          # sinograma → imagen
-exp.model2 = ClassifierNet(10)   # clasificador MNIST
-exp.model3 = CenterRegressor()   # centro (x, y)
+exp.model1 = ReconNet(A, H, W, 50)    # sinograma → imagen
+exp.model2 = ClassifierNet(10)        # clasificador MNIST
+exp.model3 = CenterRegressor()        # centro (x, y)
 
 
 history = exp.train(
     training_path=save_path,      
     validation_path=save_path,      
-    max_len_train=2,               
-    max_len_val=1,                 
+    max_len_train=1000,               
+    max_len_val=200,                 
     epochs=None,                   
 )
 
@@ -76,7 +76,7 @@ plt.ylabel("Loss")
 plt.title("Model 1 — Reconstruction Loss")
 plt.legend()
 plt.grid(True)
-plt.savefig(f"{save_path}_model1_loss.png", dpi=200)
+plt.savefig(f"{save_path}model1_loss.png", dpi=200)
 
 # --- Modelo 2: Clasificador ---
 plt.figure(figsize=(7,5))
@@ -87,7 +87,7 @@ plt.ylabel("Loss")
 plt.title("Model 2 — Classification Loss")
 plt.legend()
 plt.grid(True)
-plt.savefig(f"{save_path}_model2_loss.png", dpi=200)
+plt.savefig(f"{save_path}model2_loss.png", dpi=200)
 
 
 # --- Modelo 3: Centro ---
@@ -99,12 +99,12 @@ plt.ylabel("Loss")
 plt.title("Model 3 — Center Regression Loss")
 plt.legend()
 plt.grid(True)
-plt.savefig(f"{save_path}_model3_loss.png", dpi=200)
+plt.savefig(f"{save_path}model3_loss.png", dpi=200)
 
 
 results = exp.test(
     test_path=save_path,   
-    max_len_test=1)        
+    max_len_test=200)        
 
 print(results)
 
