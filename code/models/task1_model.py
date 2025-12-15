@@ -42,6 +42,7 @@ class ClassifierNet(nn.Module):
             nn.MaxPool2d(2),  # 100 -> 50
             nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(),
             nn.MaxPool2d(2),  # 50 -> 25
+            nn.AdaptiveAvgPool2d(1)
         )
         self.fc = nn.Linear(64, num_classes)
 

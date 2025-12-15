@@ -1,19 +1,14 @@
 from code.models.model_base import ModelBase
 from code.models.task1_model import ClassifierNet
 from accelerate import Accelerator
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import tomosipo as ts
-import numpy as np
-import torch
+
 
 accelerator = Accelerator()
 
 
 #parameter values
 batch_size = 10
-epochs = 40
+epochs = 15
 H = 100
 W = 100
 dimension = (H, W)
@@ -36,7 +31,7 @@ exp1 = ModelBase(
     epochs=epochs,
     optimizer_type=optimizer_type,
     learning_rate=learning_rate,
-    debug=False,
+    debug=True,
     accelerator=accelerator,
     task = "classify",
     scheduler= scheduler)

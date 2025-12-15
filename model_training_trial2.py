@@ -1,19 +1,14 @@
 from code.models.model_base import ModelBase
 from code.models.task2_model import CenterRegressor
 from accelerate import Accelerator
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import tomosipo as ts
-import numpy as np
-import torch
+
 
 accelerator = Accelerator()
 
 
 #parameter values
 batch_size = 10
-epochs = 40
+epochs = 15
 H = 100
 W = 100
 dimension = (H, W)
@@ -27,7 +22,7 @@ save_path = "/home/as3628/multi-task-learning/results/centre finder completed"
 
 
 exp2 = ModelBase(
-    model_path="mnist_classifier_complete",
+    model_path="mnist_centre_finder_complete",
     dimension=dimension,
     cut=cut,
     seed=seed,
@@ -35,7 +30,7 @@ exp2 = ModelBase(
     epochs=epochs,
     optimizer_type=optimizer_type,
     learning_rate=learning_rate,
-    debug=False,
+    debug=True,
     accelerator=accelerator,
     task = "centre_finder",
     scheduler= scheduler)
@@ -43,6 +38,12 @@ exp2 = ModelBase(
 
 exp2.model = CenterRegressor()        # centro (x, y)
 
+# Train + test
+history = exp2.train()
+results = exp2.test()
 
-
-
+# Plots (si ya las tienes)
+exp2.plot_training(history, out_path=f"{save_path}/{exp2.model_path}_train.png")
+exp2.plot_validation_metrics(history, out_path=f"{save_path}/{exp2.model_path}_valmetrics.png")
+exp2.plot_test(out_path=save_path, normalize_cm=False)
+exp2.plot_test(out_path=save_path, normalize_cm=True)

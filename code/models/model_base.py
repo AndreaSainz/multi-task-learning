@@ -3,8 +3,8 @@ import torch
 from torch.nn import MSELoss, CrossEntropyLoss, Module
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from dataloader.data_loader import MnistDataset
-from utils.metrics import update_confusion_matrix, metrics_from_confusion_matrix, soft_argmax_2d
+from code.dataloader.data_loader import MnistDataset
+from code.utils.metrics import update_confusion_matrix, metrics_from_confusion_matrix, soft_argmax_2d
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import logging
