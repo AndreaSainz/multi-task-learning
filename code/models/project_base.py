@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 
 
 
-class ModelBase(Module):
+class ProjectBase(Module):
     
     def __init__(self, model_path, dimension, num_angles, sigma, standard_dose, cut, seed, batch_size, epochs, optimizer_type, learning_rate, debug,  accelerator,  scheduler = (True,True,True)):
         super().__init__()

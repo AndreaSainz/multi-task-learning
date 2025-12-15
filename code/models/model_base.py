@@ -4,7 +4,7 @@ from torch.nn import MSELoss, CrossEntropyLoss, Module
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from dataloader.data_loader import MnistDataset
-from utils.metrics import compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
+from utils.metrics import update_confusion_matrix, metrics_from_confusion_matrix, soft_argmax_2d
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import logging
@@ -13,7 +13,6 @@ import json
 import random
 import numpy as np
 import gc
-import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -22,7 +21,7 @@ import matplotlib.pyplot as plt
 
 class ModelBase(Module):
     
-    def __init__(self, model_path, dimension, num_angles, sigma, standard_dose, cut, seed, batch_size, epochs, optimizer_type, learning_rate, debug,  accelerator, task,  scheduler = True):
+    def __init__(self, model_path, dimension, cut, seed, batch_size, epochs, optimizer_type, learning_rate, debug,  accelerator, task,  scheduler = True):
         super().__init__()
 
         # model parameters
@@ -33,8 +32,6 @@ class ModelBase(Module):
 
         # dataset parameters
         self.model = None
-        
-        self.sigma = sigma
         self.max_len_train = None
         self.max_len_val = None
         self.max_len_test = None
@@ -45,9 +42,9 @@ class ModelBase(Module):
         self.batch_size = batch_size
         self.dimension = dimension
         self.H, self.W = self.dimension
-        self.num_angles = num_angles
-        self.sigma = sigma
-        self.standard_dose = standard_dose
+        self.num_angles = 10
+        self.sigma = 1
+        self.standard_dose = True
         self.cut = cut
         self.seed = seed
         self.epochs = epochs
@@ -207,7 +204,7 @@ class ModelBase(Module):
 
         # initialize the total training loss
         total_train_loss = 0
-
+        n_samples = 0
 
         # loop over the training set
         for batch_id, batch in enumerate(train_dataloader):
@@ -224,6 +221,8 @@ class ModelBase(Module):
             
             # perform a forward pass and calculate the training loss
             pred = self.model(gt_image)
+            if self.task != "classify":
+                    pred, _ = soft_argmax_2d(pred, beta=50.0)
             loss_value = loss(pred, gt)
 
         
@@ -235,8 +234,9 @@ class ModelBase(Module):
 
 
             # add the loss to the total training loss so far
-            total_train_loss += loss_value.item()
-            
+            B = gt.shape[0]
+            total_train_loss += loss_value.item() * B
+            n_samples += B
 
             #Clean memory
             del gt_image, gt_label, gt_centre, gt, pred, loss_value
@@ -250,7 +250,7 @@ class ModelBase(Module):
                 elif torch.backends.mps.is_available():
                     torch.mps.empty_cache()
 
-        return total_train_loss
+        return total_train_loss, n_samples
 
 
     def validation(self, val_dataloader, loss, e):
@@ -263,6 +263,7 @@ class ModelBase(Module):
 
             # initialize validation metrics
             total_val_loss = 0
+            n_samples = 0
             
             #initlize metrics
             state, metrics_cfg = self._init_metric_state()
@@ -282,6 +283,8 @@ class ModelBase(Module):
                 
                 # make the predictions and calculate the validation loss
                 pred = self.model(gt_image)
+                if self.task != "classify":
+                    pred, _ = soft_argmax_2d(pred, beta=50.0)
                 loss_value = loss(pred, gt)
 
 
@@ -289,7 +292,9 @@ class ModelBase(Module):
                 self._update_metrics_state(state, metrics_cfg, pred, gt)
                 
                 # add the loss to the total validation loss so far
-                total_val_loss+= loss_value.item()
+                B = gt.shape[0]
+                total_val_loss+= loss_value.item()*B
+                n_samples += B
                 
                 del gt_image, gt_label, gt_centre, gt, pred, loss_value
                 #Clean memory
@@ -304,7 +309,7 @@ class ModelBase(Module):
                         torch.mps.empty_cache()
         
         val_metrics = self._finalize_metrics_state(state, metrics_cfg)
-        return total_val_loss, val_metrics
+        return total_val_loss, n_samples, val_metrics
 
         
 
@@ -372,15 +377,15 @@ class ModelBase(Module):
         for e in t:
 
             # call the training function
-            total_train_loss = self.train_one_epoch(train_dataloader, opt, loss, e)
+            total_train_loss, train_n = self.train_one_epoch(train_dataloader, opt, loss, e)
 
             # call the validation function
-            total_val_loss, val_metrics = self.validation(val_dataloader, loss, e)
+            total_val_loss, val_n, val_metrics = self.validation(val_dataloader, loss, e)
             history.setdefault("val_metrics", []).append(val_metrics)
 
             # update our training history
-            avg_train_loss = total_train_loss / len(train_dataloader)
-            avg_val_loss = total_val_loss/ len(val_dataloader)
+            avg_train_loss = total_train_loss / max(1, train_n)
+            avg_val_loss = total_val_loss/ max(1, val_n)
             history["train_loss"].append(avg_train_loss)
             history["val_loss"].append(avg_val_loss)
             # save checkpoint every 5 epochs
@@ -447,6 +452,7 @@ class ModelBase(Module):
            
             # initialize metrics
             total_test_loss = 0
+            n_samples = 0
 
 
             #initilize metrics
@@ -468,17 +474,21 @@ class ModelBase(Module):
 
                 # make the predictions and calculate the validation loss
                 pred = self.model(gt_image)
+                if self.task != "classify":
+                    pred, _ = soft_argmax_2d(pred, beta=50.0)
                 loss_value = loss(pred, gt)
 
                 #update metrics
                 self._update_metrics_state(state, metrics_cfg, pred, gt)
 
                 if self.task != "classify":
-                    mse_each = ((pred - gt) ** 2).mean(dim=1)   # (B,)
+                    mse_each = ((pred - gt) ** 2).sum(dim=1)
                     per_sample_mse.append(mse_each.detach().cpu())
                 
                 # add the loss to the total validation loss so far
-                total_test_loss += loss_value.item()
+                B = gt.shape[0]
+                total_test_loss += loss_value.item() * B
+                n_samples += B
                 
 
 
@@ -501,7 +511,7 @@ class ModelBase(Module):
         
         test_metrics = self._finalize_metrics_state(state, metrics_cfg)
         per_sample_mse = torch.cat(per_sample_mse).numpy() if len(per_sample_mse) else None
-        return gt_images, gts, preds, total_test_loss, test_metrics, per_sample_mse
+        return gt_images, gts, preds, total_test_loss, n_samples, test_metrics, per_sample_mse
 
     def test(self, max_len_test=None,):
 
@@ -523,10 +533,10 @@ class ModelBase(Module):
         self._log("=== TEST START ===")
         
         # call evaliation function
-        gt_images, gts, preds, total_test_loss, test_metrics, per_sample_mse = self.evaluate(test_dataloader, loss)
+        gt_images, gts, preds, total_test_loss, test_n, test_metrics, per_sample_mse = self.evaluate(test_dataloader, loss)
     
         # training history
-        avg_test_loss = total_test_loss / len(test_dataloader)
+        avg_test_loss = total_test_loss / max(1, test_n)
         
         
         results = {
@@ -571,7 +581,7 @@ class ModelBase(Module):
 
         else: 
             metrics_cfg = {"model": ["mse"]}
-            state = {"model": {"n_batches": 0, "mse": 0.0}}
+            state = {"model": {"mse_sum": 0.0, "n_samples": 0}}
         return state, metrics_cfg
 
     def _update_metrics_state(self, state, metrics_cfg, pred, gt):
@@ -587,10 +597,9 @@ class ModelBase(Module):
             state["model"]["n_batches"] += 1
 
         else:
-            for m in metrics_cfg["model"]:
-                if m == "mse":
-                    state["model"]["mse"] += compute_mse(pred, gt)
-            state["model"]["n_batches"] += 1
+            err2 = ((pred - gt) ** 2).sum(dim=1)   # MSE por muestra
+            state["model"]["mse_sum"] += err2.sum().item()
+            state["model"]["n_samples"] += gt.shape[0]
 
 
 
@@ -610,10 +619,9 @@ class ModelBase(Module):
 
 
         else:
-            nb = max(1, state["model"]["n_batches"])
+            n = max(1, state["model"]["n_samples"])
             results["model"] = {}
-            for m in metrics_cfg["model"]:
-                results["model"][m] = state["model"][m] / nb
+            results["model"]["mse"] = state["model"]["mse_sum"] / n
 
         return results
     
@@ -655,7 +663,7 @@ class ModelBase(Module):
         ckpt = {
             "epoch": epoch,
             "model_state": self.accelerator.unwrap_model(self.model).state_dict(),
-            "optimizer_state": self.optimizer.state_dict(),
+            "optimizer_state": self.optimizer.state_dict() if hasattr(self, "optimizer") and self.optimizer is not None else None,
             "loss_fn": self.loss_fn.__class__.__name__ if self.loss_fn is not None else None,
             "history": history,
             "rng_state": {
@@ -697,9 +705,9 @@ class ModelBase(Module):
     ############################################################################ Plots ############################################################################
 
     def plot_training(self, history, out_path):
-        if out_png is None:
-            out_png = f"{self.model_path}_train_curves.png"
-        os.makedirs(out_png, exist_ok=True)
+        if out_path is None:
+            out_path = f"{self.model_path}_train_curves.png"
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
         train_loss = history.get("train_loss", [])
         val_loss = history.get("val_loss", [])
@@ -713,7 +721,7 @@ class ModelBase(Module):
         plt.title("Training / Validation loss")
         plt.legend()
         plt.tight_layout()
-        plt.savefig(out_png, dpi=200)
+        plt.savefig(out_path, dpi=200)
         plt.close()
 
     def plot_validation_metrics(self, history, out_path):
@@ -723,7 +731,7 @@ class ModelBase(Module):
         
         if out_path is None:
             out_path = f"{self.model_path}_val_metrics.png"
-        os.makedirs(out_path, exist_ok=True)
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
 
         # get the metrics based on the model trained
         model_metrics = [vm.get("model", {}) for vm in val_metrics]
@@ -750,24 +758,24 @@ class ModelBase(Module):
     
     def plot_test(self, out_path=None, normalize_cm=True):
         if out_path is None:
-            out_path = os.path.dirname(self.model_path) if os.path.dirname(self.model_path) else "."
+            out_path = os.path.dirname(self.model_path) or "."
         os.makedirs(out_path, exist_ok=True)
 
-        # Carga métricas
         with open(f"{self.model_path}_test_metrics.json", "r") as f:
             results = json.load(f)
 
         if self.task == "classify":
-            # 1) Confusion matrix desde JSON (la añadiste en _finalize_metrics_state)
             cm = np.array(results["metrics"]["model"]["confusion_matrix"], dtype=np.float32)
 
             cm_plot = cm.copy()
             if normalize_cm:
                 row_sums = cm_plot.sum(axis=1, keepdims=True)
                 cm_plot = cm_plot / np.maximum(row_sums, 1e-12)
+                fname = f"{os.path.basename(self.model_path)}_test_confusion_matrix_normalized.png"
+            else:
+                fname = f"{os.path.basename(self.model_path)}_test_confusion_matrix.png"
 
-            out_png = os.path.join(out_path, f"{os.path.basename(self.model_path)}_test_confusion_matrix.png")
-            os.makedirs(out_png, exist_ok=True)
+            out_png = os.path.join(out_path, fname)
 
             plt.figure()
             plt.imshow(cm_plot, aspect="auto")
@@ -780,15 +788,12 @@ class ModelBase(Module):
             plt.close()
 
         else:
-            # 2) Violin de MSE por muestra desde JSON
             per_sample_mse = results.get("per_sample_mse", None)
             if per_sample_mse is None:
                 raise RuntimeError("No per_sample_mse found. You must compute it in evaluate() and save it to JSON.")
 
             x = np.asarray(per_sample_mse, dtype=np.float32)
-
             out_png = os.path.join(out_path, f"{os.path.basename(self.model_path)}_test_mse_violin.png")
-            os.makedirs(out_png, exist_ok=True)
 
             plt.figure()
             plt.violinplot(x, showmeans=True, showextrema=True)

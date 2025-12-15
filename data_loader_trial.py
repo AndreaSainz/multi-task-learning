@@ -1,4 +1,4 @@
-from data_loader import MnistDataset
+from code.dataloader.data_loader import MnistDataset
 from torch.utils.data import DataLoader
 import numpy as np
 import random

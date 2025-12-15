@@ -1,7 +1,7 @@
-from model_base import ModelBase
-from inverse_model import ReconNet
-from task1_model import ClassifierNet
-from task2_model import CenterRegressor
+from code.models.project_base import ProjectBase
+from code.models.inverse_model import ReconNet
+from code.models.task1_model import ClassifierNet
+from code.models.task2_model import CenterRegressor
 from accelerate import Accelerator
 import matplotlib
 matplotlib.use("Agg")
@@ -37,7 +37,7 @@ angles = np.linspace(0, np.pi, num_angles, endpoint=True)                       
 pg = ts.parallel(angles=angles, shape=(1, H))                                       # Parallel beam structure
 A = ts.operator(vg,pg)     
 
-exp = ModelBase(
+exp = ProjectBase(
     model_path="mnist_ct_experiment",
     dimension=dimension,
     num_angles=num_angles,
