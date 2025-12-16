@@ -1,11 +1,12 @@
 import tomosipo as ts
 import torch
-from torch.nn import MSELoss, CrossEntropyLoss, Module
+from torch.nn import CrossEntropyLoss, Module, SmoothL1Loss
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from code.dataloader.data_loader import MnistDataset
-from code.utils.metrics import update_confusion_matrix, metrics_from_confusion_matrix, soft_argmax_2d
+from code.utils.metrics import update_confusion_matrix, metrics_from_confusion_matrix
 from torch.utils.data import DataLoader, random_split
+import torch.nn.functional as F
 from tqdm import tqdm
 import logging
 import os
@@ -71,6 +72,44 @@ class ModelBase(Module):
         self.pg = ts.parallel(angles=self.angles, shape=(1, self.H))            # Parallel beam structure
         self.A = ts.operator(self.vg,self.pg)         
    
+    @staticmethod
+    def show_samples(dataloader, save_path, n=5):
+        batch = next(iter(dataloader))
+        imgs = batch["ground_truth_image"][:n]
+        labels = batch["label"][:n]
+
+        plt.figure(figsize=(n * 2, 2))
+        for i in range(n):
+            plt.subplot(1, n, i + 1)
+            plt.imshow(imgs[i, 0].detach().cpu(), cmap="gray")
+            plt.title(f"label={labels[i].item()}")
+            plt.axis("off")
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+
+    def debug_loader(self, dataloader, name="train", n_show=5, save_path=None):
+        mins, maxs = [], []
+        counts = torch.zeros(self.num_classes, dtype=torch.long)
+
+        # 1) stats + counts
+        for batch in dataloader:
+            x = batch["ground_truth_image"]
+            y = batch["label"]
+
+            mins.append(x.min().item())
+            maxs.append(x.max().item())
+            counts += torch.bincount(y.cpu(), minlength=self.num_classes)
+
+        self._log(f"[{name}] min={min(mins):.4f}, max={max(maxs):.4f}")
+        total = counts.sum().item()
+        for c in range(self.num_classes):
+            self._log(f"[{name}] class {c}: {counts[c].item()} ({100*counts[c].item()/max(1,total):.2f}%)")
+
+        # 2) show samples
+        if save_path is not None:
+            self.show_samples(dataloader, save_path, n=n_show)
 
 
     def _setup_logger(self):
@@ -197,7 +236,6 @@ class ModelBase(Module):
 
 
     def train_one_epoch(self, train_dataloader, opt, loss, e):
-
         # set the model in training mode
         self.model.train()
         
@@ -208,30 +246,38 @@ class ModelBase(Module):
 
         # loop over the training set
         for batch_id, batch in enumerate(train_dataloader):
+            # to see if the parameters are being updated
+            if e == 0 and batch_id == 0:
+                p = next(self.model.parameters())
+                self._log(f"param mean before: {p.data.mean().item():.6f}")
 
             # take data from batch
             gt_image = batch["ground_truth_image"]
             gt_label = batch["label"]
             gt_centre = batch["centre"]
 
+
             if self.task == "classify":
                 gt = gt_label
             else: 
                 gt = gt_centre
+                
             
             # perform a forward pass and calculate the training loss
             pred = self.model(gt_image)
-            if self.task != "classify":
-                    pred, _ = soft_argmax_2d(pred, beta=50.0)
             loss_value = loss(pred, gt)
 
-        
+    
 
             # zero out the gradients, perform the backpropagation step, and update the weights
             opt.zero_grad()
             self.accelerator.backward(loss_value)
             opt.step()
 
+             # to see if the parameters are being updated
+            if e == 0 and batch_id == 0:
+                p = next(self.model.parameters())
+                self._log(f"param mean after: {p.data.mean().item():.6f}")
 
             # add the loss to the total training loss so far
             B = gt.shape[0]
@@ -254,7 +300,6 @@ class ModelBase(Module):
 
 
     def validation(self, val_dataloader, loss, e):
-        
         # switch off autograd for evaluation
         with torch.no_grad():
 
@@ -283,8 +328,6 @@ class ModelBase(Module):
                 
                 # make the predictions and calculate the validation loss
                 pred = self.model(gt_image)
-                if self.task != "classify":
-                    pred, _ = soft_argmax_2d(pred, beta=50.0)
                 loss_value = loss(pred, gt)
 
 
@@ -307,7 +350,8 @@ class ModelBase(Module):
 
                     elif torch.backends.mps.is_available():
                         torch.mps.empty_cache()
-        
+
+
         val_metrics = self._finalize_metrics_state(state, metrics_cfg)
         return total_val_loss, n_samples, val_metrics
 
@@ -325,6 +369,14 @@ class ModelBase(Module):
 
         # load training and validation datasets
         train_dataloader, val_dataloader = self._get_dataloaders()
+
+        
+        #debug_train_loader = DataLoader(train_dataloader.dataset, batch_size=self.batch_size, shuffle=False)
+        #debug_val_loader   = DataLoader(val_dataloader.dataset,   batch_size=self.batch_size, shuffle=False)
+        #self.debug_loader(debug_train_loader, name="train", save_path="training_examples.png")
+        #self.debug_loader(debug_val_loader, name="val", save_path="validation_examples.png")
+
+    
 
         # send models to device
         self.model.to(self.device)
@@ -348,7 +400,7 @@ class ModelBase(Module):
             self.loss_fn =CrossEntropyLoss()
             loss = self.loss_fn
         else:
-            self.loss_fn = MSELoss()
+            self.loss_fn = SmoothL1Loss(reduction="mean")
             loss = self.loss_fn
 
 
@@ -356,7 +408,8 @@ class ModelBase(Module):
         # accelerates training
         self.model, opt, train_dataloader, val_dataloader = self.accelerator.prepare(self.model, self.optimizer, train_dataloader, val_dataloader)
         
-        
+        self.optimizer = opt
+
         # initialize scheduler for learning rate
         if self.scheduler:
             scheduler = ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=5)
@@ -371,7 +424,7 @@ class ModelBase(Module):
         
         t = tqdm(range(epochs), desc="Epochs")
 
-        self._log(f"=== TRAIN START | task={self.task} | epochs={epochs} | lr={self.learning_rate} | bs={self.batch_size} ===")
+        self._log(f"=== TRAIN START | task={self.task} | epochs={epochs} | learning rate={self.learning_rate} | batch size={self.batch_size} ===")
 
         # loop over our epochs
         for e in t:
@@ -389,9 +442,9 @@ class ModelBase(Module):
             history["train_loss"].append(avg_train_loss)
             history["val_loss"].append(avg_val_loss)
             # save checkpoint every 5 epochs
-            if e  % 5 == 1:
-                self.save_checkpoint(epoch=e, history=history)
-                self._log(f"Checkpoint saved at epoch {e}")
+            if (e+1)  % 5 == 1:
+                self.save_checkpoint(epoch=e+1, history=history)
+                self._log(f"Checkpoint saved at epoch {e+1}")
 
             # update the learning rate scheduler (when the validation loss is not improving)
             if self.scheduler:
@@ -437,7 +490,6 @@ class ModelBase(Module):
 
 
     def evaluate(self, test_dataloader, loss):
-
         # save ground truth and predictions
         gt_images = []
         gts = []
@@ -460,10 +512,12 @@ class ModelBase(Module):
 
             # loop over the validation set
             for batch_id, batch in enumerate(tqdm(test_dataloader)):
+
                 # take data from batch
                 gt_image = batch["ground_truth_image"]
                 gt_label = batch["label"]
                 gt_centre = batch["centre"]
+
 
                 if self.task == "classify":
                     gt = gt_label
@@ -474,8 +528,6 @@ class ModelBase(Module):
 
                 # make the predictions and calculate the validation loss
                 pred = self.model(gt_image)
-                if self.task != "classify":
-                    pred, _ = soft_argmax_2d(pred, beta=50.0)
                 loss_value = loss(pred, gt)
 
                 #update metrics
@@ -509,6 +561,7 @@ class ModelBase(Module):
                     elif torch.backends.mps.is_available():
                         torch.mps.empty_cache()
         
+
         test_metrics = self._finalize_metrics_state(state, metrics_cfg)
         per_sample_mse = torch.cat(per_sample_mse).numpy() if len(per_sample_mse) else None
         return gt_images, gts, preds, total_test_loss, n_samples, test_metrics, per_sample_mse
@@ -524,6 +577,9 @@ class ModelBase(Module):
 
         # get test data loader
         test_dataloader = self._get_test_dataloaders()
+        
+        #debug_test_loader   = DataLoader(test_dataloader.dataset,   batch_size=self.batch_size, shuffle=False)
+        #self.debug_loader(debug_test_loader, name="test", n_show=5, save_path="test_examples.png")
         
 
         #initialice accelerator
@@ -580,8 +636,8 @@ class ModelBase(Module):
             state = {"model": {"n_batches": 0, "cm": torch.zeros(self.num_classes, self.num_classes, device=self.device, dtype=torch.int64)}}
 
         else: 
-            metrics_cfg = {"model": ["mse"]}
-            state = {"model": {"mse_sum": 0.0, "n_samples": 0}}
+            metrics_cfg = {"model": ["smoothl1", "mse"]}
+            state = {"model": {"smoothl1_sum": 0.0, "mse_sum": 0.0, "n_samples": 0}}
         return state, metrics_cfg
 
     def _update_metrics_state(self, state, metrics_cfg, pred, gt):
@@ -597,8 +653,11 @@ class ModelBase(Module):
             state["model"]["n_batches"] += 1
 
         else:
-            err2 = ((pred - gt) ** 2).sum(dim=1)   # MSE por muestra
-            state["model"]["mse_sum"] += err2.sum().item()
+            #metrics per sample
+            s1 = F.smooth_l1_loss(pred, gt, reduction="none").sum(dim=1)
+            mse = ((pred - gt) ** 2).sum(dim=1)
+            state["model"]["smoothl1_sum"] += s1.sum().item()
+            state["model"]["mse_sum"] += mse.sum().item()
             state["model"]["n_samples"] += gt.shape[0]
 
 
@@ -607,11 +666,10 @@ class ModelBase(Module):
         """
         Converts accumulators into final metrics dict (means + classifier metrics).
         """
-        results = {}
+        results = {"model": {}}
 
         if self.task == "classify":
             cm_cpu = state["model"]["cm"].detach().cpu()
-            results["model"] = {}
             results["model"]["confusion_matrix"] = cm_cpu.tolist()
             for m in metrics_cfg["model"]:
                 if m == "classifier_metrics":
@@ -620,7 +678,7 @@ class ModelBase(Module):
 
         else:
             n = max(1, state["model"]["n_samples"])
-            results["model"] = {}
+            results["model"]["smoothl1"] = state["model"]["smoothl1_sum"] / n
             results["model"]["mse"] = state["model"]["mse_sum"] / n
 
         return results
@@ -744,7 +802,11 @@ class ModelBase(Module):
 
         plt.figure()
         for k in keys:
+            if k == "confusion_matrix":
+                continue
             y = [d.get(k, np.nan) for d in model_metrics]
+            if isinstance(y[0], (list, dict, np.ndarray)):
+                continue
             plt.plot(epochs, y, label=k)
 
         plt.xlabel("epoch")

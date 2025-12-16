@@ -8,21 +8,21 @@ accelerator = Accelerator()
 
 #parameter values
 batch_size = 10
-epochs = 15
+epochs = 20
 H = 100
 W = 100
 dimension = (H, W)
 cut = False
 seed = 29072000
-optimizer_type = "SGD"
-learning_rate = 1e-3
+optimizer_type = "AdamW"
+learning_rate = 5e-4
 scheduler = True
 
-save_path = "/home/as3628/multi-task-learning/results/centre finder completed"
+save_path = "results/centre finder completed"
 
 
 exp2 = ModelBase(
-    model_path="mnist_centre_finder_complete",
+    model_path=f"{save_path}/mnist_centre_finder_complete",
     dimension=dimension,
     cut=cut,
     seed=seed,
@@ -36,7 +36,7 @@ exp2 = ModelBase(
     scheduler= scheduler)
 
 
-exp2.model = CenterRegressor()        # centro (x, y)
+exp2.model = CenterRegressor(H,W)        # centro (x, y)
 
 # Train + test
 history = exp2.train()

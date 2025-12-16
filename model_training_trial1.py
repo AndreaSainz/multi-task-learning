@@ -8,22 +8,22 @@ accelerator = Accelerator()
 
 #parameter values
 batch_size = 10
-epochs = 15
+epochs = 10
 H = 100
 W = 100
 dimension = (H, W)
 cut = False
 seed = 29072000
-optimizer_type = "SGD"
+optimizer_type = "AdamW"
 learning_rate = 1e-3
 scheduler = True
 
-save_path = "/home/as3628/multi-task-learning/results/classifier completed"
+save_path = "results/classifier completed"
 
 
 
 exp1 = ModelBase(
-    model_path="mnist_classifier_complete",
+    model_path=f"{save_path}/mnist_classifier_complete",
     dimension=dimension,
     cut=cut,
     seed=seed,
