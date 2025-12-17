@@ -15,7 +15,7 @@ dimension = (H, W)
 cut = False
 seed = 29072000
 optimizer_type = "AdamW"
-learning_rate = 5e-4
+learning_rate = 1e-3
 scheduler = True
 
 save_path = "results/centre finder completed"

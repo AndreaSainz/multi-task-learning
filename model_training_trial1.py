@@ -8,7 +8,7 @@ accelerator = Accelerator()
 
 #parameter values
 batch_size = 10
-epochs = 10
+epochs = 15
 H = 100
 W = 100
 dimension = (H, W)

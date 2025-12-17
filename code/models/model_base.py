@@ -637,7 +637,7 @@ class ModelBase(Module):
 
         else: 
             metrics_cfg = {"model": ["smoothl1", "mse"]}
-            state = {"model": {"smoothl1_sum": 0.0, "mse_sum": 0.0, "n_samples": 0}}
+            state = {"model": {"smoothl1_sum": 0.0, "l2_sum": 0.0, "n_samples": 0}}
         return state, metrics_cfg
 
     def _update_metrics_state(self, state, metrics_cfg, pred, gt):
@@ -655,9 +655,10 @@ class ModelBase(Module):
         else:
             #metrics per sample
             s1 = F.smooth_l1_loss(pred, gt, reduction="none").sum(dim=1)
-            mse = ((pred - gt) ** 2).sum(dim=1)
+            se = ((pred - gt) ** 2).sum(dim=1)              # (B,) = dx^2+dy^2
+            l2 = torch.sqrt(se)
             state["model"]["smoothl1_sum"] += s1.sum().item()
-            state["model"]["mse_sum"] += mse.sum().item()
+            state["model"]["l2_sum"] += l2.sum().item()
             state["model"]["n_samples"] += gt.shape[0]
 
 
