@@ -636,7 +636,7 @@ class ModelBase(Module):
             state = {"model": {"n_batches": 0, "cm": torch.zeros(self.num_classes, self.num_classes, device=self.device, dtype=torch.int64)}}
 
         else: 
-            metrics_cfg = {"model": ["smoothl1", "mse"]}
+            metrics_cfg = {"model": ["smoothl1", "l2"]}
             state = {"model": {"smoothl1_sum": 0.0, "l2_sum": 0.0, "n_samples": 0}}
         return state, metrics_cfg
 
@@ -680,7 +680,7 @@ class ModelBase(Module):
         else:
             n = max(1, state["model"]["n_samples"])
             results["model"]["smoothl1"] = state["model"]["smoothl1_sum"] / n
-            results["model"]["mse"] = state["model"]["mse_sum"] / n
+            results["model"]["l2"] = state["model"]["l2_sum"] / n
 
         return results
     
