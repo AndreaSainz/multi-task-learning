@@ -7,11 +7,14 @@ from dataloader.data_loader import MnistDataset
 from utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
+import logging
+from torch.nn import SmoothL1Loss
 import json
 import random
 import numpy as np
 import gc
 import pandas as pd
+import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -20,7 +23,7 @@ import matplotlib.pyplot as plt
 
 class ProjectBase(Module):
     
-    def __init__(self, model_path, dimension, num_angles, sigma, standard_dose, cut, seed, batch_size, epochs, optimizer_type, learning_rate, debug,  accelerator,  scheduler = (True,True,True)):
+    def __init__(self, model_path, dimension, num_angles, sigma, standard_dose, cut, seed, batch_size, epochs, optimizer_type, learning_rate, debug,  accelerator,  scheduler = (True,True)):
         super().__init__()
 
                                                                              
@@ -50,22 +53,21 @@ class ProjectBase(Module):
         self.cut = cut
         self.seed = seed
         self.epochs = epochs
-        self.learning_rate_1, self.learning_rate_2, self.learning_rate_3 = learning_rate
+        self.learning_rate_2, self.learning_rate_3 = learning_rate
         self.seed = seed
         self.debug = debug
-        self.optimizer_type_1, self.optimizer_type_2, self.optimizer_type_3 = optimizer_type
-        self.optimizer_1 = None
+        self.logger = self._setup_logger() if self.debug else None
+        self.optimizer_type_2, self.optimizer_type_3 = optimizer_type
         self.optimizer_2 = None
         self.optimizer_3 = None
         self.loss_fn_1 = None
         self.loss_fn_2 = None
         self.loss_fn_3 = None
-        self.scheduler_1, self.scheduler_2, self.scheduler_3 = scheduler
+        self.scheduler_2, self.scheduler_3 = scheduler
         
 
         # accelerator for faster code
         self.accelerator = accelerator
-        self.trainable_params_1 = None
         self.trainable_params_2 = None
         self.trainable_params_3 = None
 
@@ -78,7 +80,116 @@ class ProjectBase(Module):
         self.pg = ts.parallel(angles=self.angles, shape=(1, self.H))            # Parallel beam structure
         self.A = ts.operator(self.vg,self.pg)         
    
+    @staticmethod
+    def show_samples(dataloader, save_path, n=5):
+        batch = next(iter(dataloader))
+        imgs = batch["ground_truth_image"][:n]
+        labels = batch["label"][:n]
 
+        plt.figure(figsize=(n * 2, 2))
+        for i in range(n):
+            plt.subplot(1, n, i + 1)
+            plt.imshow(imgs[i, 0].detach().cpu(), cmap="gray")
+            plt.title(f"label={labels[i].item()}")
+            plt.axis("off")
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+
+
+
+    def show_samples_train(self, ground_truth_image, reconstructed_image, gt_label, pred_label, gt_centre, pred_centre, n=5):
+        n = min(n, ground_truth_image.shape[0])
+
+        imgs = ground_truth_image[:n]
+        rec_imgs = reconstructed_image[:n]
+        labels = gt_label[:n]
+        pred_labels = pred_label[:n]
+       
+        centres = gt_centre[:n]
+        pred_centres = pred_centre[:n]
+
+        fig, axes = plt.subplots(n, 2, figsize=(6, 3 * n))
+
+        if n == 1:
+            axes = np.expand_dims(axes, axis=0)
+
+        for i in range(n):
+            # --- Ground truth ---
+            axes[i, 0].imshow(imgs[i, 0].detach().cpu(), cmap="gray")
+            axes[i, 0].set_title("Ground truth")
+            axes[i, 0].axis("off")
+
+            # --- Reconstruction ---
+            axes[i, 1].imshow(rec_imgs[i, 0].detach().cpu(), cmap="gray")
+            axes[i, 1].set_title("Reconstruction")
+            axes[i, 1].axis("off")
+
+            # --- Row title ---
+            pred_cls = pred_labels[i].argmax().item()
+            row_title = (
+                f"GT label: {labels[i].item()} | "
+                f"Pred label: {pred_cls} | "
+                f"GT centre: ({centres[i][0].item():.1f}, {centres[i][1].item():.1f}) | "
+                f"Pred centre: ({pred_centres[i][0].item():.1f}, {pred_centres[i][1].item():.1f})"
+            )
+            axes[i, 0].set_ylabel(row_title, rotation=0, fontsize=9, labelpad=120, va="center")
+
+        plt.tight_layout()
+        plt.savefig(f"{self.model_path}_train_pred_examples.png", dpi=200)
+        plt.close()
+
+
+
+    def debug_loader(self, dataloader, name="train", n_show=5, save_path=None):
+        mins, maxs = [], []
+        counts = torch.zeros(self.num_classes, dtype=torch.long)
+
+        # stats + counts
+        for batch in dataloader:
+            x = batch["ground_truth_image"]
+            y = batch["label"]
+
+            mins.append(x.min().item())
+            maxs.append(x.max().item())
+            counts += torch.bincount(y.cpu(), minlength=self.num_classes)
+
+        self._log(f"[{name}] min={min(mins):.4f}, max={max(maxs):.4f}")
+        total = counts.sum().item()
+        for c in range(self.num_classes):
+            self._log(f"[{name}] class {c}: {counts[c].item()} ({100*counts[c].item()/max(1,total):.2f}%)")
+
+        # 2) show samples
+        if save_path is not None:
+            self.show_samples(dataloader, save_path, n=n_show)
+
+
+    def _setup_logger(self):
+        if not self.debug:
+            return None
+
+        logger = logging.getLogger(f"ModelBase::{self.model_path}")
+        logger.setLevel(logging.INFO)
+
+        if logger.handlers:
+            return logger
+
+        log_path = f"{self.model_path}.log"
+        fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S")
+
+        fh = logging.FileHandler(log_path, mode="a")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+
+        logger.propagate = False
+        return logger
+
+
+    def _log(self, msg: str):
+        if self.logger is not None:
+            self.logger.info(msg)
 
     def _set_seed(self):
 
@@ -177,76 +288,52 @@ class ProjectBase(Module):
         return test_dataloader
 
 
-    def train_one_epoch(self, train_dataloader, opt1, opt2, opt3, loss1, loss2, loss3, e):
+    def train_one_epoch(self, train_dataloader, opt2, opt3, loss1, loss2, loss3, e):
 
         # set the model in training mode
-        self.model1.train()
+        self.model1.eval()
         self.model2.train()
         self.model3.train()
+
+        # initilize metrics
+        state, metrics_cfg = self._init_metric_state()
 
         # initialize the total training loss
         total_train_loss_1 = 0
         total_train_loss_2 = 0
         total_train_loss_3 = 0
-
+        n_samples = 0
 
         # loop over the training set
         for batch_id, batch in enumerate(train_dataloader):
 
             # send the input to the device
             ground_truth_1 = batch["ground_truth_image"]
-            #print(f"Ground Truth Image Shape: {ground_truth_1.shape}")
             ground_truth_2 = batch["label"]
             ground_truth_3 = batch["centre"]
             input_data = batch["noisy_sinogram"]
 
 
             # perform a forward pass and calculate the training loss
-            #pred_1 = ground_truth_1.clone()
             pred_1 = self.model1(input_data)
             loss_value_1 = loss1(pred_1, ground_truth_1)
 
-            # fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-            # img0 = input_data[0, 0].detach().cpu().numpy()
-            # im0 = axes[0].imshow(img0, cmap="gray")
-            # axes[0].set_title("Sinograma")
-            # axes[0].axis("off")
-            # fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-
-            # img1 = pred_1[0, 0].detach().cpu().numpy()
-            # im1 = axes[1].imshow(img1, cmap="gray")
-            # axes[1].set_title("Reconstrucción pred_1")
-            # axes[1].axis("off")
-            # fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-
-            # img2 = ground_truth_1[0, 0].detach().cpu().numpy()
-            # im2 = axes[2].imshow(img2, cmap="gray")
-            # axes[2].set_title("Ground truth")
-            # axes[2].axis("off")
-            # fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-
-
-            # plt.tight_layout()
-            # plt.savefig(f"debug_epoch{e}_batch{batch_id}.png")
-            # plt.close(fig)
-
 
             # doing simultanious tasks
-            pred_1_detached = pred_1.detach() ###### ESTO SOLO DE MOMENTO PORQUE QUEREMOS QUE LOS MODELOS SEAN INDEPENDIENTES, ESTO CAMBIARÁ
+            pred_1_detached = pred_1.detach()
             # classifier
             pred_2 = self.model2(pred_1_detached)
             loss_value_2 = loss2(pred_2, ground_truth_2)
-
-            #print(f"Original label: {ground_truth_2}, Predicted label = {pred_2}")
 
             # find the center
             pred_3 = self.model3(pred_1_detached)
             loss_value_3 = loss3(pred_3, ground_truth_3)
 
-            #print(f"Original center: {ground_truth_3}, Predicted center = {pred_3}")
+            
 
-            # checking that predictions and ground truth images have same shape
-            assert ground_truth_1.shape == pred_1_detached.shape, f"[ERROR] Shape mismatch: predicted {pred_1_detached.shape}, ground truth {ground_truth_1.shape}"
+            # printing examples to see how bad the reconstruction is, ONLY in the first epoch
+            if e == 0:
+                self.show_samples_train(ground_truth_1, pred_1_detached, ground_truth_2, pred_2, ground_truth_3, pred_3, n=5)
 
             # zero out the gradients, perform the backpropagation step, and update the weights
             # Model 1 is just a SIRT so it does not train
@@ -263,10 +350,21 @@ class ProjectBase(Module):
             self.accelerator.backward(loss_value_3)
             opt3.step()
 
+            # update metrics
+            self._update_metrics_state(
+                state, metrics_cfg,
+                pred_1, ground_truth_1,
+                pred_2, ground_truth_2,
+                pred_3, ground_truth_3,
+                data_range=1.0,
+                compute_train_mse=True)
+
             # add the loss to the total training loss so far
-            total_train_loss_1 += loss_value_1.item()
-            total_train_loss_2 += loss_value_2.item()
-            total_train_loss_3 += loss_value_3.item()
+            B = ground_truth_1.shape[0]
+            total_train_loss_1 += loss_value_1.item()*B
+            total_train_loss_2 += loss_value_2.item()*B
+            total_train_loss_3 += loss_value_3.item()*B
+            n_samples += B
 
             #Clean memory
             del input_data, ground_truth_1, ground_truth_2, ground_truth_3, pred_1, pred_2, pred_3, loss_value_1, loss_value_2, loss_value_3
@@ -280,7 +378,8 @@ class ProjectBase(Module):
                 elif torch.backends.mps.is_available():
                     torch.mps.empty_cache()
 
-        return total_train_loss_1, total_train_loss_2, total_train_loss_3
+        train_metrics = self._finalize_metrics_state(state, metrics_cfg)
+        return total_train_loss_1, total_train_loss_2, total_train_loss_3, train_metrics, n_samples
 
 
     def validation(self, val_dataloader, loss1, loss2, loss3, e):
@@ -297,6 +396,7 @@ class ProjectBase(Module):
             total_val_loss_1 = 0
             total_val_loss_2 = 0
             total_val_loss_3 = 0
+            n_samples = 0
             
             #initlize metrics
             state, metrics_cfg = self._init_metric_state()
@@ -330,13 +430,15 @@ class ProjectBase(Module):
                     pred_1, ground_truth_1,
                     pred_2, ground_truth_2,
                     pred_3, ground_truth_3,
-                    data_range=1.0
-                )
+                    data_range=1.0,
+                    compute_train_mse=False)
                 
-                # add the loss to the total validation loss so far
-                total_val_loss_1 += loss_value_1.item()
-                total_val_loss_2 += loss_value_2.item()
-                total_val_loss_3 += loss_value_3.item()
+                # add the loss to the total validation loss so far 
+                B = ground_truth_1.shape[0]
+                total_val_loss_1 += loss_value_1.item()*B
+                total_val_loss_2 += loss_value_2.item()*B
+                total_val_loss_3 += loss_value_3.item()*B
+                n_samples += B
 
                 # checking that predictions and ground truth images have same shape
                 assert ground_truth_1.shape == pred_1.shape, f"[ERROR] Shape mismatch: predicted {pred_1.shape}, ground truth {ground_truth_1.shape}"
@@ -354,7 +456,7 @@ class ProjectBase(Module):
                         torch.mps.empty_cache()
         
         val_metrics = self._finalize_metrics_state(state, metrics_cfg)
-        return total_val_loss_1, total_val_loss_2, total_val_loss_3, val_metrics
+        return total_val_loss_1, total_val_loss_2, total_val_loss_3, val_metrics, n_samples
 
         
 
@@ -374,25 +476,19 @@ class ProjectBase(Module):
         # load training and validation datasets
         train_dataloader, val_dataloader = self._get_dataloaders()
 
+        debug_train_loader = DataLoader(train_dataloader.dataset, batch_size=self.batch_size, shuffle=False)
+        debug_val_loader   = DataLoader(val_dataloader.dataset,   batch_size=self.batch_size, shuffle=False)
+        if self.debug:
+            self.debug_loader(debug_train_loader, name="train", save_path="training_examples.png")
+            self.debug_loader(debug_val_loader, name="val", save_path="validation_examples.png")
+
         # send models to device
         self.model1.to(self.device)
         self.model2.to(self.device)
         self.model3.to(self.device)
         
         ######################################## INVERSE PROBLEM ALGORITHM ########################################
-        # Get only parameters that have requires_grad=True
-        trainable_params_1 = [p for p in self.model1.parameters() if p.requires_grad]
-
-        # Optimizer
-        if self.optimizer_type_1 == "Adam":
-            self.optimizer_1 = Adam(trainable_params_1, lr=self.learning_rate_1)
-        elif self.optimizer_type_1 == "AdamW":
-            self.optimizer_1 = AdamW(trainable_params_1, lr=self.learning_rate_1)
-        elif self.optimizer_type_1 == "SGD":
-            self.optimizer_1 = SGD(trainable_params_1, lr=self.learning_rate_1)
-        else:
-            raise ValueError(f"Unsupported optimizer type: {self.optimizer_type_1}")
-
+        
         # Loss function
         self.loss_fn_1 = MSELoss()
         loss1 = self.loss_fn_1
@@ -433,19 +529,16 @@ class ProjectBase(Module):
             raise ValueError(f"Unsupported optimizer type: {self.optimizer_type_3}")
 
         # Loss function
-        self.loss_fn_3 = MSELoss()
+        self.loss_fn_3 = SmoothL1Loss(reduction="mean")
         loss3= self.loss_fn_3
 
 
         # accelerates training
-        self.model1, opt1, train_dataloader, val_dataloader = self.accelerator.prepare(self.model1, self.optimizer_1, train_dataloader, val_dataloader)
+        self.model1, train_dataloader, val_dataloader = self.accelerator.prepare(self.model1, train_dataloader, val_dataloader)
         self.model2, opt2 = self.accelerator.prepare(self.model2, self.optimizer_2)
         self.model3, opt3 = self.accelerator.prepare(self.model3, self.optimizer_3)
         
         # initialize scheduler for learning rate
-        if self.scheduler_1:
-            scheduler1 = ReduceLROnPlateau(opt1, mode='min', factor=0.5, patience=5)
-        
         if self.scheduler_2:
             scheduler2 = ReduceLROnPlateau(opt2, mode='min', factor=0.5, patience=5)
 
@@ -462,26 +555,28 @@ class ProjectBase(Module):
             "val_loss_3": []
         }
 
-        
+        self._log(f"=== TRAIN START | epochs={epochs} | learning rates=({self.learning_rate_2},{self.learning_rate_3}) | batch size={self.batch_size} ===")
+
         t = tqdm(range(epochs), desc="Epochs")
 
         # loop over our epochs
         for e in t:
 
             # call the training function
-            total_train_loss_1, total_train_loss_2, total_train_loss_3 = self.train_one_epoch(train_dataloader, opt1, opt2, opt3, loss1, loss2, loss3, e)
+            total_train_loss_1, total_train_loss_2, total_train_loss_3, train_metrics, n_train = self.train_one_epoch(train_dataloader, opt2, opt3, loss1, loss2, loss3, e)
+            history.setdefault("train_metrics", []).append(train_metrics)
 
             # call the validation function
-            total_val_loss_1, total_val_loss_2, total_val_loss_3, val_metrics = self.validation(val_dataloader, loss1, loss2, loss3, e)
+            total_val_loss_1, total_val_loss_2, total_val_loss_3, val_metrics, n_val = self.validation(val_dataloader, loss1, loss2, loss3, e)
             history.setdefault("val_metrics", []).append(val_metrics)
 
             # update our training history
-            avg_train_loss_1 = total_train_loss_1 / len(train_dataloader)
-            avg_train_loss_2 = total_train_loss_2 / len(train_dataloader)
-            avg_train_loss_3 = total_train_loss_3 / len(train_dataloader)
-            avg_val_loss_1 = total_val_loss_1 / len(val_dataloader)
-            avg_val_loss_2 = total_val_loss_2 / len(val_dataloader)
-            avg_val_loss_3 = total_val_loss_3 / len(val_dataloader)
+            avg_train_loss_1 = total_train_loss_1 / n_train
+            avg_train_loss_2 = total_train_loss_2 / n_train
+            avg_train_loss_3 = total_train_loss_3 / n_train
+            avg_val_loss_1 = total_val_loss_1 / n_val
+            avg_val_loss_2 = total_val_loss_2 / n_val
+            avg_val_loss_3 = total_val_loss_3 / n_val
             history["train_loss_1"].append(avg_train_loss_1)
             history["train_loss_2"].append(avg_train_loss_2)
             history["train_loss_3"].append(avg_train_loss_3)
@@ -489,11 +584,13 @@ class ProjectBase(Module):
             history["val_loss_2"].append(avg_val_loss_2)
             history["val_loss_3"].append(avg_val_loss_3)
 
+            # save checkpoint every 5 epochs
+            if (e+1)  % 5 == 0:
+                self.save_checkpoint(epoch=e+1, history=history)
+                self._log(f"Checkpoint saved at epoch {e+1}")
 
             # update the learning rate scheduler (when the validation loss is not improving)
-            if self.scheduler_1:
-                scheduler1.step(avg_val_loss_1)
-            
+        
             if self.scheduler_2:
                 scheduler2.step(avg_val_loss_2)
             
@@ -515,6 +612,17 @@ class ProjectBase(Module):
                 "val_loss_3": f"{avg_val_loss_3:.6f}"
             })
 
+            #logger
+            lr2_now = opt2.param_groups[0]["lr"]
+            lr3_now = opt3.param_groups[0]["lr"]
+            self._log(
+                f"[Epoch {e+1}/{epochs}] lr=({lr2_now:.3e},{lr3_now:.3e}) | "
+                f"train_loss_1={avg_train_loss_1:.6f}, val_loss_1={avg_val_loss_1:.6f} | "
+                f"train_loss_2={avg_train_loss_2:.6f}, val_loss_2={avg_val_loss_2:.6f} | "
+                f"train_loss_3={avg_train_loss_3:.6f}, val_loss_3={avg_val_loss_3:.6f} | "
+                f"val_metrics={val_metrics}"
+            )
+
             #Clean memory
             gc.collect()
 
@@ -529,6 +637,11 @@ class ProjectBase(Module):
         # Save final metrics
         with open(f'{self.model_path}_metrics.json', 'w') as f:
             json.dump(history, f)
+        
+        self._log(f"Final training history saved at {self.model_path}_metrics.json")
+        self.save_checkpoint(epoch=epochs, history=history)
+        self._log("Final checkpoint saved")
+        self._log("=== TRAIN END ===")
 
         return history
 
@@ -554,6 +667,7 @@ class ProjectBase(Module):
             total_test_loss_1 = 0
             total_test_loss_2 = 0
             total_test_loss_3 = 0
+            n_samples = 0
 
             #initilize metrics
             state, metrics_cfg = self._init_metric_state()
@@ -574,11 +688,12 @@ class ProjectBase(Module):
 
                 # doing simultanious tasks
                 # classifier
-                pred_2 = self.model2(pred_1)
+                pred_1_detached = pred_1.detach()
+                pred_2 = self.model2(pred_1_detached)
                 loss_value_2 = loss2(pred_2, ground_truth_2)
 
                 # find the center
-                pred_3 = self.model3(pred_1)
+                pred_3 = self.model3(pred_1_detached)
                 loss_value_3 = loss3(pred_3, ground_truth_3)
 
                 #update metrics
@@ -587,13 +702,16 @@ class ProjectBase(Module):
                     pred_1, ground_truth_1,
                     pred_2, ground_truth_2,
                     pred_3, ground_truth_3,
-                    data_range=1.0
+                    data_range=1.0,
+                    compute_train_mse=False
                 )
                 
                 # add the loss to the total validation loss so far
-                total_test_loss_1 += loss_value_1.item()
-                total_test_loss_2 += loss_value_2.item()
-                total_test_loss_3 += loss_value_3.item()
+                B = ground_truth_1.shape[0]
+                total_test_loss_1 += loss_value_1.item()*B
+                total_test_loss_2 += loss_value_2.item()*B
+                total_test_loss_3 += loss_value_3.item()*B
+                n_samples += B
 
                 # checking that predictions and ground truth images have same shape
                 assert ground_truth_1.shape == pred_1.shape, f"[ERROR] Shape mismatch: predicted {pred_1.shape}, ground truth {ground_truth_1.shape}"
@@ -617,11 +735,12 @@ class ProjectBase(Module):
                         torch.mps.empty_cache()
         
         test_metrics = self._finalize_metrics_state(state, metrics_cfg)
-        return img_pred, label_pred, centre_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics
+        return img_pred, label_pred, centre_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics, n_samples
 
 
     def test(self, test_path, max_len_test=None,):
 
+        self._log("=== TEST START ===")
         #changing paths parameters
         self.test_path = test_path
         self.max_len_test = max_len_test
@@ -632,8 +751,12 @@ class ProjectBase(Module):
 
         # get test data loader
         test_dataloader = self._get_test_dataloaders()
-        
 
+        debug_test_loader   = DataLoader(test_dataloader.dataset,   batch_size=self.batch_size, shuffle=False)
+        if self.debug:
+            self.debug_loader(debug_test_loader, name="test", n_show=5, save_path="test_examples.png")
+
+        
         #initialice accelerator
         self.model1, test_dataloader = self.accelerator.prepare(self.model1, test_dataloader)
         self.model2 = self.accelerator.prepare(self.model2)
@@ -645,12 +768,12 @@ class ProjectBase(Module):
         
 
         # call evaliation function
-        img_pred, label_pred, centre_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics = self.evaluate(test_dataloader, loss1, loss2, loss3)
+        img_pred, label_pred, centre_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics, n_test = self.evaluate(test_dataloader, loss1, loss2, loss3)
     
         # training history
-        avg_test_loss_1 = total_test_loss_1 / len(test_dataloader)
-        avg_test_loss_2 = total_test_loss_2 / len(test_dataloader)
-        avg_test_loss_3 = total_test_loss_3 / len(test_dataloader)
+        avg_test_loss_1 = total_test_loss_1 / n_test
+        avg_test_loss_2 = total_test_loss_2 / n_test
+        avg_test_loss_3 = total_test_loss_3 / n_test
         
 
         results = {
@@ -671,12 +794,17 @@ class ProjectBase(Module):
         with open(f'{self.model_path}_test_metrics.json', 'w') as f:
             json.dump(results, f)
 
+        self._log(
+            f"test_loss_1={avg_test_loss_1:.6f} | "
+            f"test_loss_2={avg_test_loss_2:.6f} | "
+            f"test_loss_3={avg_test_loss_3:.6f} | "
+            f"test_metrics={test_metrics}"
+        )
+        self._log(f"Final test metrics saved at {self.model_path}_test_metrics.json")
+        self._log("=== TEST END ===")
+
         return results
     
-
-
-
-
 
     ############################################################################ Metrics for batch ############################################################################
 
@@ -687,31 +815,35 @@ class ProjectBase(Module):
             state, metrics_cfg
         """
         metrics_cfg = {
-            "model1": ["psnr", "ssim"],          # CT recon
+            "model1": ["mse", "psnr", "ssim", ],          # CT recon
             "model2": ["classifier_metrics"],    # classifier
-            "model3": ["mse"],                   # center regression
+            "model3": ["l2", "smoothl1"],        # center regression
         }
 
         state = {
-            "model1": {"n_batches": 0, "psnr": 0.0, "ssim": 0.0},
+            "model1": {"n_batches": 0,"mse_sum": 0.0, "psnr_sum": 0.0, "ssim_sum": 0.0, "n_samples": 0},
             "model2": {"n_batches": 0, "cm": torch.zeros(self.num_classes, self.num_classes, device=self.device, dtype=torch.int64)},
-            "model3": {"n_batches": 0, "mse": 0.0},
+            "model3": {"n_batches": 0, "l2_sum": 0.0, "smoothl1_sum": 0.0, "n_samples": 0},
         }
 
         return state, metrics_cfg
 
-    def _update_metrics_state(self, state, metrics_cfg, pred_1, gt_1, pred_2, gt_2, pred_3, gt_3, data_range=1.0):
+    def _update_metrics_state(self, state, metrics_cfg, pred_1, gt_1, pred_2, gt_2, pred_3, gt_3, data_range=1.0, compute_train_mse=False):
         """
         Updates metric accumulators for a batch.
         """
+        B = gt_1.shape[0]
+
         # model1 metrics (CT recon)
         if "model1" in metrics_cfg:
             for m in metrics_cfg["model1"]:
                 if m == "psnr":
-                    state["model1"]["psnr"] += compute_psnr_results(pred_1, gt_1, max_val=data_range)
+                    state["model1"]["psnr_sum"] += compute_psnr_results(pred_1, gt_1, max_val=data_range) * B
                 elif m == "ssim":
-                    state["model1"]["ssim"] += compute_ssim(pred_1, gt_1, data_range=data_range)
-            state["model1"]["n_batches"] += 1
+                    state["model1"]["ssim_sum"] += compute_ssim(pred_1, gt_1, data_range=data_range) * B
+                elif m == "mse":
+                    state["model1"]["mse_sum"] += compute_mse(pred_1, gt_1) * B
+            state["model1"]["n_samples"] += B
 
         # model2 metrics (classifier)
         if "model2" in metrics_cfg:
@@ -724,9 +856,11 @@ class ProjectBase(Module):
         # model3 metrics (center regression)
         if "model3" in metrics_cfg:
             for m in metrics_cfg["model3"]:
-                if m == "mse":
-                    state["model3"]["mse"] += compute_mse(pred_3, gt_3)
-            state["model3"]["n_batches"] += 1
+                if m == "l2":
+                    state["model3"]["l2_sum"] += ((pred_3-gt_3)**2).sum(dim=1).sqrt().sum().item()
+                elif m == "smoothl1":
+                    state["model3"]["smoothl1_sum"] += self.loss_fn_3(pred_3, gt_3).item() * B
+            state["model3"]["n_samples"] += B
 
 
     def _finalize_metrics_state(self, state, metrics_cfg):
@@ -735,26 +869,267 @@ class ProjectBase(Module):
         """
         results = {}
 
-        # model1 mean metrics
-        if "model1" in metrics_cfg:
-            nb = max(1, state["model1"]["n_batches"])
-            results["model1"] = {}
-            for m in metrics_cfg["model1"]:
-                results["model1"][m] = state["model1"][m] / nb
+        # model1
+        n1 = max(1, state["model1"]["n_samples"])
+        results["model1"] = {}
+        if "mse" in metrics_cfg["model1"]:
+            results["model1"]["mse"] = state["model1"]["mse_sum"] / n1
+        if "psnr" in metrics_cfg["model1"]:
+            results["model1"]["psnr"] = state["model1"]["psnr_sum"] / n1
+        if "ssim" in metrics_cfg["model1"]:
+            results["model1"]["ssim"] = state["model1"]["ssim_sum"] / n1
 
-        # model2 from confusion matrix
-        if "model2" in metrics_cfg:
-            results["model2"] = {}
-            for m in metrics_cfg["model2"]:
-                if m == "classifier_metrics":
-                    results["model2"].update(metrics_from_confusion_matrix(state["model2"]["cm"].detach().cpu()))
+        # model2
+        results["model2"] = {}
+        if "classifier_metrics" in metrics_cfg["model2"]:
+            results["model2"].update(metrics_from_confusion_matrix(state["model2"]["cm"].detach().cpu()))
 
-        # model3 mean metrics
-        if "model3" in metrics_cfg:
-            nb = max(1, state["model3"]["n_batches"])
-            results["model3"] = {}
-            for m in metrics_cfg["model3"]:
-                results["model3"][m] = state["model3"][m] / nb
+        # model3
+        n3 = max(1, state["model3"]["n_samples"])
+        results["model3"] = {}
+        if "l2" in metrics_cfg["model3"]:
+            results["model3"]["l2"] = state["model3"]["l2_sum"] / n3
+        if "smoothl1" in metrics_cfg["model3"]:
+            results["model3"]["smoothl1"] = state["model3"]["smoothl1_sum"] / n3
 
         return results
-        
+
+    ############################################################################ Checkpoints and save model ############################################################################
+
+    def _get_config(self):
+        return {
+            "num_classes": self.num_classes,
+            "model_path": self.model_path,
+            "dimension": list(self.dimension),
+            "num_angles": self.num_angles,
+            "sigma": self.sigma,
+            "standard_dose": self.standard_dose,
+            "cut": self.cut,
+            "seed": self.seed,
+            "batch_size": self.batch_size,
+            "epochs": self.epochs,
+            "optimizer_type_2": self.optimizer_type_2,
+            "optimizer_type_3": self.optimizer_type_3,
+            "learning_rate_2": self.learning_rate_2,
+            "learning_rate_3": self.learning_rate_3,
+            "scheduler_2": self.scheduler_2,
+            "scheduler_3": self.scheduler_3,
+            "max_len_train": self.max_len_train,
+            "max_len_val": self.max_len_val,
+            "max_len_test": self.max_len_test,
+            # útil para recrear exactamente el modelo
+            "model_class_1": self.model1.__class__.__name__ if self.model1 is not None else None,
+            "model_class_2": self.model2.__class__.__name__ if self.model2 is not None else None,
+            "model_class_3": self.model3.__class__.__name__ if self.model3 is not None else None,
+        }
+
+
+    def save_checkpoint(self, epoch, history):
+
+        # 1) config JSON
+        cfg_path = f"{self.model_path}_config.json"
+        with open(cfg_path, "w") as f:
+            json.dump(self._get_config(), f, indent=2)
+
+        # 2) checkpoint torch
+        ckpt = {
+            "epoch": epoch,
+            "model1_state": self.accelerator.unwrap_model(self.model1).state_dict(),
+            "model2_state": self.accelerator.unwrap_model(self.model2).state_dict(),
+            "model3_state": self.accelerator.unwrap_model(self.model3).state_dict(),
+            "optimizer2_state": self.optimizer_2.state_dict(),
+            "optimizer3_state": self.optimizer_3.state_dict(),
+            "history": history,
+            "rng_state": {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            }
+            }
+        torch.save(ckpt, f"{self.model_path}_checkpoint.pt")
+
+
+    def load_checkpoint(self, load_optimizer: bool = True):
+        ckpt_path = f"{self.model_path}_checkpoint.pt"
+        ckpt = torch.load(ckpt_path, map_location=self.device)
+
+        self.model1.to(self.device); self.model2.to(self.device); self.model3.to(self.device)
+        self.model1.load_state_dict(ckpt["model1_state"])
+        self.model2.load_state_dict(ckpt["model2_state"])
+        self.model3.load_state_dict(ckpt["model3_state"])
+
+        if load_optimizer:
+            if self.optimizer_2 is not None and ckpt.get("optimizer2_state") is not None:
+                self.optimizer_2.load_state_dict(ckpt["optimizer2_state"])
+            if self.optimizer_3 is not None and ckpt.get("optimizer3_state") is not None:
+                self.optimizer_3.load_state_dict(ckpt["optimizer3_state"])
+
+        # restaura RNG (opcional, para reproducibilidad)
+        rs = ckpt.get("rng_state", None)
+        if rs is not None:
+            random.setstate(rs["python"])
+            np.random.set_state(rs["numpy"])
+            torch.set_rng_state(rs["torch"])
+            if torch.cuda.is_available() and rs["cuda"] is not None:
+                torch.cuda.set_rng_state_all(rs["cuda"])
+
+        return ckpt.get("epoch", None), ckpt.get("history", None)
+    
+
+    ############################################################################ Plots ############################################################################
+
+    def _extract_metric_series(self, metrics_list, model_key, metric_key, n_epochs):
+        """metrics_list: history['train_metrics'] or history['val_metrics']"""
+        out = []
+        for i in range(n_epochs):
+            if i < len(metrics_list):
+                out.append(metrics_list[i].get(model_key, {}).get(metric_key, np.nan))
+            else:
+                out.append(np.nan)
+        return out
+
+
+    def plot_per_model_metrics(self, history, out_dir=None):
+        """
+        Crea:
+        - 3 plots separados (model1/model2/model3) con métricas train/val por epoch
+        - 1 plot conjunto (resumen) para comparar a la vez
+        """
+        if out_dir is None:
+            out_dir = os.path.dirname(self.model_path) or "."
+        os.makedirs(out_dir, exist_ok=True)
+
+        train_m = history.get("train_metrics", [])
+        val_m   = history.get("val_metrics", [])
+
+        # número de epochs según lo que haya guardado
+        n_epochs = max(len(train_m), len(val_m),
+                    len(history.get("train_loss_1", [])),
+                    len(history.get("val_loss_1", [])))
+        if n_epochs == 0:
+            return
+
+        epochs = np.arange(1, n_epochs + 1)
+
+        # Define qué quieres plotear por modelo
+        model_cfg = {
+            "model1": ["mse", "psnr", "ssim"],
+            "model2": ["accuracy", "f1_macro"],   # ajusta a lo que devuelva metrics_from_confusion_matrix
+            "model3": ["l2", "smoothl1"],
+        }
+
+        # --------- 1) Plots separados por modelo ----------
+        for model_key, metric_keys in model_cfg.items():
+            plt.figure()
+            for mk in metric_keys:
+                y_tr = self._extract_metric_series(train_m, model_key, mk, n_epochs)
+                y_va = self._extract_metric_series(val_m,   model_key, mk, n_epochs)
+
+                plt.plot(epochs, y_tr, label=f"train_{mk}")
+                plt.plot(epochs, y_va, label=f"val_{mk}")
+
+            plt.xlabel("epoch")
+            plt.ylabel("metric")
+            plt.title(f"{model_key}: train vs val metrics")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_{model_key}_metrics.png"), dpi=200)
+            plt.close()
+
+        # --------- 2) Plot conjunto (resumen) ----------
+        # Para que no sea ilegible: elige 1-2 métricas “top” por modelo
+        summary = [
+            ("model1", "psnr"),
+            ("model1", "ssim"),
+            ("model2", "accuracy"),
+            ("model3", "l2"),
+        ]
+
+        plt.figure()
+        for model_key, mk in summary:
+            y_tr = self._extract_metric_series(train_m, model_key, mk, n_epochs)
+            y_va = self._extract_metric_series(val_m,   model_key, mk, n_epochs)
+            plt.plot(epochs, y_tr, label=f"{model_key}_train_{mk}")
+            plt.plot(epochs, y_va, label=f"{model_key}_val_{mk}")
+
+        plt.xlabel("epoch")
+        plt.ylabel("metric")
+        plt.title("Summary metrics (train vs val)")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_ALL_models_summary.png"), dpi=200)
+        plt.close()
+    
+    def plot_test_per_model(self, out_dir=None):
+        if out_dir is None:
+            out_dir = os.path.dirname(self.model_path) or "."
+        os.makedirs(out_dir, exist_ok=True)
+
+        with open(f"{self.model_path}_test_metrics.json", "r") as f:
+            results = json.load(f)
+
+        metrics = results.get("metrics", {})
+
+        # model1
+        if "model1" in metrics:
+            m = metrics["model1"]
+            keys = [k for k in ["mse", "psnr", "ssim"] if k in m]
+            plt.figure()
+            plt.bar(keys, [m[k] for k in keys])
+            plt.title("Test metrics - model1")
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model1.png"), dpi=200)
+            plt.close()
+
+        # model2 (si tienes confusion matrix, tu plot cm puede seguir)
+        if "model2" in metrics:
+            m = metrics["model2"]
+            keys = [k for k in ["accuracy", "f1_macro", "precision_macro", "recall_macro"] if k in m]
+            if keys:
+                plt.figure()
+                plt.bar(keys, [m[k] for k in keys])
+                plt.title("Test metrics - model2")
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model2.png"), dpi=200)
+                plt.close()
+
+            # --- confusion matrix ---
+            if "confusion_matrix" in m:
+                cm = np.asarray(m["confusion_matrix"], dtype=np.float32)
+
+                # sin normalizar
+                plt.figure()
+                plt.imshow(cm, aspect="auto")
+                plt.colorbar()
+                plt.xlabel("pred")
+                plt.ylabel("gt")
+                plt.title("Test confusion matrix - model2")
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model2_cm.png"), dpi=200)
+                plt.close()
+
+                # normalizada por fila (recall por clase)
+                row_sums = cm.sum(axis=1, keepdims=True)
+                cm_norm = cm / np.maximum(row_sums, 1e-12)
+
+                plt.figure()
+                plt.imshow(cm_norm, aspect="auto")
+                plt.colorbar()
+                plt.xlabel("pred")
+                plt.ylabel("gt")
+                plt.title("Test confusion matrix (normalized) - model2")
+                plt.tight_layout()
+                plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model2_cm_norm.png"), dpi=200)
+                plt.close()
+
+        # model3
+        if "model3" in metrics:
+            m = metrics["model3"]
+            keys = [k for k in ["l2", "smoothl1"] if k in m]
+            plt.figure()
+            plt.bar(keys, [m[k] for k in keys])
+            plt.title("Test metrics - model3")
+            plt.tight_layout()
+            plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model3.png"), dpi=200)
+            plt.close()

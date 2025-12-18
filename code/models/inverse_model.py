@@ -30,20 +30,14 @@ class ReconNet(nn.Module):
            (la forma exacta debe ser consistente con cómo usas ts.operator)
         Devuelve: x_recon [B, 1, H, W]
         """
-        B = y.shape[0]
-        #print("sinogram has NaN?", torch.isnan(y).any())
+        B = y.shape[0] #batch
         device = y.device
-        x = torch.zeros(B,1,self.H, self.W, device=device)
+        x = torch.zeros(B, 1, self.H, self.W, device=device)
 
         for k in range(self.n_iters):
             Ax = self.A_torch(x)
-            #print(f"iter {k}: Ax has NaN?", torch.isnan(Ax).any())
             r = y - Ax
-            #print(f"iter {k}: r has NaN?", torch.isnan(r).any())
             AT_r = self.AT_torch(r)
-            #print(f"iter {k}: AT_r has NaN?", torch.isnan(AT_r).any())
-
             x = x + self.alpha * AT_r
-            #print(f"iter {k}: x has NaN?", torch.isnan(x).any())
 
         return x

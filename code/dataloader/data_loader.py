@@ -172,7 +172,7 @@ class MnistDataset(Dataset):
         return norm_tensor * max_val  
     
     
-    def noise(self, sinogram):
+    def noise(self, sinogram, g):
         """
         Add realistic Poisson + Gaussian noise to a sinogram.
 
@@ -204,8 +204,7 @@ class MnistDataset(Dataset):
         noisy_sinogram = -torch.log(measured_photons / self.i_0)
 
         # Adding gaussian noise (detector's imperfections)
-        gaussian_noise = torch.normal(mean=0, std=self.sigma, size=sinogram.shape, dtype=sinogram.dtype, device=sinogram.device) 
-        #other functions do not allow for device
+        gaussian_noise = torch.randn(sinogram.shape, device=sinogram.device, dtype=sinogram.dtype, generator=g) * self.sigma
 
         # Final result 
         noisy_sinogram += gaussian_noise
@@ -218,7 +217,7 @@ class MnistDataset(Dataset):
 
         return noisy_sinogram
     
-    def padding_and_translation(self,img):
+    def padding_and_translation(self,img, g):
         """
         Embed a MNIST digit into a larger zero-padded canvas with translation.
 
@@ -244,8 +243,8 @@ class MnistDataset(Dataset):
         ###### ESTO ESTA SIN IMPLEMENTAR #####
         if self.cut:
             # poistion of the top-left corner of mnist
-            x = torch.randint(0, self.H, (1,)).item()
-            y = torch.randint(0, self.W, (1,)).item()
+            x = torch.randint(0, self.H, (1,), generator=g, device=self.device).item()
+            y = torch.randint(0, self.W, (1,), generator=g, device=self.device).item()
 
 
             #place the mnist number on the new image
@@ -256,8 +255,8 @@ class MnistDataset(Dataset):
 
         else: 
             # poistion of the top-left corner of mnist
-            x = torch.randint(0, self.H - h + 1, (1,)).item()
-            y = torch.randint(0, self.W - w + 1, (1,)).item()
+            x = torch.randint(0, self.H - h + 1, (1,), generator=g, device=self.device).item()
+            y = torch.randint(0, self.W - w + 1, (1,), generator=g, device=self.device).item()
 
 
             #place the mnist number on the new image
@@ -287,20 +286,23 @@ class MnistDataset(Dataset):
                 center (tuple[int, int]):
                     Center coordinates of the digit in the padded canvas.
         """
-        
+        g = torch.Generator(device=self.device)
+        g.manual_seed(self.seed + int(idx))
+
         #get image and label
         img, label = self.data[idx]
+        img = img.to(self.device)
 
         #padding and translation
-        center, im_prim = self.padding_and_translation(img)
+        center, im_prim = self.padding_and_translation(img, g)
 
         #sinogram
         sinogram = self.A(im_prim)
 
         # adding noise
-        noisy_sino = self.noise(sinogram)
+        noisy_sino = self.noise(sinogram, g)
 
         return {'noisy_sinogram': noisy_sino,  
             'ground_truth_image': im_prim,
             'label': label,
-            'centre':torch.tensor(center, dtype=torch.float32)}
+            'centre': torch.tensor(center, dtype=torch.float32)}

@@ -1,6 +1,10 @@
 from code.models.model_base import ModelBase
 from code.models.task2_model import CenterRegressor
 from accelerate import Accelerator
+import os
+import random
+import numpy as np
+import torch
 
 
 accelerator = Accelerator()
@@ -19,6 +23,29 @@ learning_rate = 1e-3
 scheduler = True
 
 save_path = "results/centre finder completed"
+
+# Deterministic
+# Python
+os.environ["PYTHONHASHSEED"] = str(seed)
+random.seed(seed)
+
+# NumPy
+np.random.seed(seed)
+
+# PyTorch
+torch.manual_seed(seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(seed)
+
+# Deterministic behaviour
+torch.use_deterministic_algorithms(True)
+
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+# Needed for full CUDA determinism (must be set BEFORE CUDA ops)
+if torch.cuda.is_available():
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 
 exp2 = ModelBase(

@@ -93,7 +93,7 @@ class ModelBase(Module):
         mins, maxs = [], []
         counts = torch.zeros(self.num_classes, dtype=torch.long)
 
-        # 1) stats + counts
+        # stats + counts
         for batch in dataloader:
             x = batch["ground_truth_image"]
             y = batch["label"]
@@ -107,7 +107,7 @@ class ModelBase(Module):
         for c in range(self.num_classes):
             self._log(f"[{name}] class {c}: {counts[c].item()} ({100*counts[c].item()/max(1,total):.2f}%)")
 
-        # 2) show samples
+        # show samples
         if save_path is not None:
             self.show_samples(dataloader, save_path, n=n_show)
 
@@ -138,8 +138,8 @@ class ModelBase(Module):
         if self.logger is not None:
             self.logger.info(msg)
 
-    def _set_seed(self):
 
+    def _set_seed(self):
         random.seed(self.seed)
         np.random.seed(self.seed)
         torch.manual_seed(self.seed)
@@ -442,7 +442,7 @@ class ModelBase(Module):
             history["train_loss"].append(avg_train_loss)
             history["val_loss"].append(avg_val_loss)
             # save checkpoint every 5 epochs
-            if (e+1)  % 5 == 1:
+            if (e+1)  % 5 == 0:
                 self.save_checkpoint(epoch=e+1, history=history)
                 self._log(f"Checkpoint saved at epoch {e+1}")
 
@@ -494,7 +494,7 @@ class ModelBase(Module):
         gt_images = []
         gts = []
         preds = []
-        per_sample_mse = []
+        per_sample_l2 = []
 
         # switch off autograd for evaluation
         with torch.no_grad():
@@ -534,8 +534,8 @@ class ModelBase(Module):
                 self._update_metrics_state(state, metrics_cfg, pred, gt)
 
                 if self.task != "classify":
-                    mse_each = ((pred - gt) ** 2).sum(dim=1)
-                    per_sample_mse.append(mse_each.detach().cpu())
+                    l2_each = torch.sqrt(((pred - gt) ** 2).sum(dim=1))
+                    per_sample_l2.append(l2_each.detach().cpu())
                 
                 # add the loss to the total validation loss so far
                 B = gt.shape[0]
@@ -563,8 +563,8 @@ class ModelBase(Module):
         
 
         test_metrics = self._finalize_metrics_state(state, metrics_cfg)
-        per_sample_mse = torch.cat(per_sample_mse).numpy() if len(per_sample_mse) else None
-        return gt_images, gts, preds, total_test_loss, n_samples, test_metrics, per_sample_mse
+        per_sample_l2 = torch.cat(per_sample_l2).numpy() if len(per_sample_l2) else None
+        return gt_images, gts, preds, total_test_loss, n_samples, test_metrics, per_sample_l2
 
     def test(self, max_len_test=None,):
 
@@ -589,7 +589,7 @@ class ModelBase(Module):
         self._log("=== TEST START ===")
         
         # call evaliation function
-        gt_images, gts, preds, total_test_loss, test_n, test_metrics, per_sample_mse = self.evaluate(test_dataloader, loss)
+        gt_images, gts, preds, total_test_loss, test_n, test_metrics, per_sample_l2 = self.evaluate(test_dataloader, loss)
     
         # training history
         avg_test_loss = total_test_loss / max(1, test_n)
@@ -599,8 +599,8 @@ class ModelBase(Module):
             "test_loss": avg_test_loss,
             "metrics": test_metrics
         }
-        if per_sample_mse is not None:
-            results["per_sample_mse"] = per_sample_mse.tolist()
+        if per_sample_l2 is not None:
+            results["per_sample_l2"] = per_sample_l2.tolist()
         
         # save predictions and ground truth
         torch.save(torch.cat(gt_images), f"{self.model_path}_ground_truth_images.pt")
@@ -851,17 +851,17 @@ class ModelBase(Module):
             plt.close()
 
         else:
-            per_sample_mse = results.get("per_sample_mse", None)
-            if per_sample_mse is None:
-                raise RuntimeError("No per_sample_mse found. You must compute it in evaluate() and save it to JSON.")
+            per_sample_l2 = results.get("per_sample_l2", None)
+            if per_sample_l2 is None:
+                raise RuntimeError("No per_sample_l2 found. You must compute it in evaluate() and save it to JSON.")
 
-            x = np.asarray(per_sample_mse, dtype=np.float32)
-            out_png = os.path.join(out_path, f"{os.path.basename(self.model_path)}_test_mse_violin.png")
+            x = np.asarray(per_sample_l2, dtype=np.float32)
+            out_png = os.path.join(out_path, f"{os.path.basename(self.model_path)}_test_l2_violin.png")
 
             plt.figure()
             plt.violinplot(x, showmeans=True, showextrema=True)
-            plt.ylabel("MSE per sample")
-            plt.title("Test per-sample MSE distribution")
+            plt.ylabel("L2 per sample")
+            plt.title("Test per-sample L2 distribution")
             plt.tight_layout()
             plt.savefig(out_png, dpi=200)
             plt.close()

@@ -84,6 +84,8 @@ StyleCopReport.xml
 *.png 
 *.jpg 
 *.pt 
+*.txt
+*.sh
 *.json 
 *_i.c
 *_p.c
