@@ -1,10 +1,12 @@
 import tomosipo as ts
 import torch
+import torch.nn.functional as F
+from pytorch_msssim import ssim
 from torch.nn import MSELoss, CrossEntropyLoss, Module
 from torch.optim import SGD, Adam, AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from dataloader.data_loader import MnistDataset
-from utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
+from code.dataloader.data_loader import MnistDataset
+from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 import logging
@@ -127,14 +129,25 @@ class ProjectBase(Module):
             axes[i, 1].axis("off")
 
             # --- Row title ---
-            pred_cls = pred_labels[i].argmax().item()
-            row_title = (
-                f"GT label: {labels[i].item()} | "
-                f"Pred label: {pred_cls} | "
-                f"GT centre: ({centres[i][0].item():.1f}, {centres[i][1].item():.1f}) | "
-                f"Pred centre: ({pred_centres[i][0].item():.1f}, {pred_centres[i][1].item():.1f})"
+            if pred_labels.ndim == 2:
+                pred_cls = int(pred_labels[i].argmax().item())
+            else:
+                pred_cls = int(pred_labels[i].item())
+            txt = (
+            f"GT: {int(labels[i].item())} | Pred: {pred_cls}\n"
+            f"GT c: ({centres[i,0].item():.1f}, {centres[i,1].item():.1f}) | "
+            f"Pred c: ({pred_centres[i,0].item():.1f}, {pred_centres[i,1].item():.1f})"
             )
-            axes[i, 0].set_ylabel(row_title, rotation=0, fontsize=9, labelpad=120, va="center")
+
+            # texto dentro del panel (arriba-izquierda)
+            axes[i, 0].text(
+                0.02, 0.98, txt,
+                transform=axes[i, 0].transAxes,
+                va="top", ha="left",
+                fontsize=8,
+                bbox=dict(facecolor="white", alpha=0.75, edgecolor="none", pad=2)
+            )
+
 
         plt.tight_layout()
         plt.savefig(f"{self.model_path}_train_pred_examples.png", dpi=200)
@@ -332,7 +345,7 @@ class ProjectBase(Module):
             
 
             # printing examples to see how bad the reconstruction is, ONLY in the first epoch
-            if e == 0:
+            if e+1 == min(self.epochs, 5) and batch_id == 0:
                 self.show_samples_train(ground_truth_1, pred_1_detached, ground_truth_2, pred_2, ground_truth_3, pred_3, n=5)
 
             # zero out the gradients, perform the backpropagation step, and update the weights
@@ -460,7 +473,7 @@ class ProjectBase(Module):
 
         
 
-    def train(self, training_path, validation_path, max_len_train = None, max_len_val=None, epochs=None):
+    def train(self, training_path=None, validation_path=None, max_len_train = None, max_len_val=None, epochs=None):
 
         #changing paths parameters
         epochs = epochs or self.epochs
@@ -649,7 +662,7 @@ class ProjectBase(Module):
     def evaluate(self, test_dataloader, loss1, loss2, loss3):
 
         # save ground truth and predictions
-        gt_images = []
+        gt_images, gt_labels, gt_centres = [],[],[]
         img_pred = []
         label_pred = []
         centre_pred = []
@@ -721,6 +734,8 @@ class ProjectBase(Module):
                 label_pred.append(pred_2.cpu())
                 centre_pred.append(pred_3.cpu())
                 gt_images.append(ground_truth_1.cpu())
+                gt_labels.append(ground_truth_2.cpu())
+                gt_centres.append(ground_truth_3.cpu())
                 sinograms.append(input_data.cpu())
 
                 #Clean memory
@@ -735,10 +750,10 @@ class ProjectBase(Module):
                         torch.mps.empty_cache()
         
         test_metrics = self._finalize_metrics_state(state, metrics_cfg)
-        return img_pred, label_pred, centre_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics, n_samples
+        return img_pred, label_pred, centre_pred, gt_images, gt_labels, gt_centres, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics, n_samples
 
 
-    def test(self, test_path, max_len_test=None,):
+    def test(self, test_path=None, max_len_test=None):
 
         self._log("=== TEST START ===")
         #changing paths parameters
@@ -768,7 +783,7 @@ class ProjectBase(Module):
         
 
         # call evaliation function
-        img_pred, label_pred, centre_pred, gt_images, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics, n_test = self.evaluate(test_dataloader, loss1, loss2, loss3)
+        img_pred, label_pred, centre_pred, gt_images, gt_labels, gt_centres, sinograms, total_test_loss_1, total_test_loss_2, total_test_loss_3, test_metrics, n_test = self.evaluate(test_dataloader, loss1, loss2, loss3)
     
         # training history
         avg_test_loss_1 = total_test_loss_1 / n_test
@@ -786,6 +801,8 @@ class ProjectBase(Module):
         # save predictions and ground truth
         torch.save(torch.cat(img_pred), f"{self.model_path}_predictions_images.pt")
         torch.save(torch.cat(label_pred), f"{self.model_path}_predictions_labels.pt")
+        torch.save(torch.cat(gt_labels), f"{self.model_path}_ground_truth_labels.pt")
+        torch.save(torch.cat(gt_centres), f"{self.model_path}_ground_truth_centers.pt")
         torch.save(torch.cat(centre_pred), f"{self.model_path}_predictions_centers.pt")
         torch.save(torch.cat(gt_images), f"{self.model_path}_ground_truth_images.pt")
         torch.save(torch.cat(sinograms), f"{self.model_path}_noisy_sinograms.pt")
@@ -882,7 +899,9 @@ class ProjectBase(Module):
         # model2
         results["model2"] = {}
         if "classifier_metrics" in metrics_cfg["model2"]:
-            results["model2"].update(metrics_from_confusion_matrix(state["model2"]["cm"].detach().cpu()))
+            cm_cpu = state["model2"]["cm"].detach().cpu()
+            results["model2"]["confusion_matrix"] = cm_cpu.numpy().tolist()  
+            results["model2"].update(metrics_from_confusion_matrix(cm_cpu))
 
         # model3
         n3 = max(1, state["model3"]["n_samples"])
@@ -1061,7 +1080,7 @@ class ProjectBase(Module):
         plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_ALL_models_summary.png"), dpi=200)
         plt.close()
     
-    def plot_test_per_model(self, out_dir=None):
+    def plot_test_per_model(self, out_dir=None, normalize_cm=True):
         if out_dir is None:
             out_dir = os.path.dirname(self.model_path) or "."
         os.makedirs(out_dir, exist_ok=True)
@@ -1069,67 +1088,85 @@ class ProjectBase(Module):
         with open(f"{self.model_path}_test_metrics.json", "r") as f:
             results = json.load(f)
 
-        metrics = results.get("metrics", {})
 
-        # model1
-        if "model1" in metrics:
-            m = metrics["model1"]
-            keys = [k for k in ["mse", "psnr", "ssim"] if k in m]
-            plt.figure()
-            plt.bar(keys, [m[k] for k in keys])
-            plt.title("Test metrics - model1")
-            plt.tight_layout()
-            plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model1.png"), dpi=200)
-            plt.close()
+        # Carga tensores guardados en test()
+        pred_img = torch.load(f"{self.model_path}_predictions_images.pt", map_location="cpu")   # (N,1,H,W)
+        gt_img   = torch.load(f"{self.model_path}_ground_truth_images.pt", map_location="cpu")
 
-        # model2 (si tienes confusion matrix, tu plot cm puede seguir)
-        if "model2" in metrics:
-            m = metrics["model2"]
-            keys = [k for k in ["accuracy", "f1_macro", "precision_macro", "recall_macro"] if k in m]
-            if keys:
-                plt.figure()
-                plt.bar(keys, [m[k] for k in keys])
-                plt.title("Test metrics - model2")
-                plt.tight_layout()
-                plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model2.png"), dpi=200)
-                plt.close()
+        pred_logits = torch.load(f"{self.model_path}_predictions_labels.pt", map_location="cpu")  # (N,C)
+        gt_labels   = torch.load(f"{self.model_path}_ground_truth_labels.pt", map_location="cpu") # (N,)
 
-            # --- confusion matrix ---
-            if "confusion_matrix" in m:
-                cm = np.asarray(m["confusion_matrix"], dtype=np.float32)
+        pred_cent = torch.load(f"{self.model_path}_predictions_centers.pt", map_location="cpu")   # (N,2)
+        gt_cent   = torch.load(f"{self.model_path}_ground_truth_centers.pt", map_location="cpu")  # (N,2)
 
-                # sin normalizar
-                plt.figure()
-                plt.imshow(cm, aspect="auto")
-                plt.colorbar()
-                plt.xlabel("pred")
-                plt.ylabel("gt")
-                plt.title("Test confusion matrix - model2")
-                plt.tight_layout()
-                plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model2_cm.png"), dpi=200)
-                plt.close()
+        
 
-                # normalizada por fila (recall por clase)
-                row_sums = cm.sum(axis=1, keepdims=True)
-                cm_norm = cm / np.maximum(row_sums, 1e-12)
+        # ---------------------------
+        # (1) Model2: UNA confusion matrix
+        # ---------------------------
+        cm = np.asarray(results["metrics"]["model2"]["confusion_matrix"], dtype=np.float32)
+        if normalize_cm:
+            cm_plot = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1e-12)
+            title = "Test confusion matrix (row-normalized)"
+        else:
+            cm_plot = cm
+            title = "Test confusion matrix"
 
-                plt.figure()
-                plt.imshow(cm_norm, aspect="auto")
-                plt.colorbar()
-                plt.xlabel("pred")
-                plt.ylabel("gt")
-                plt.title("Test confusion matrix (normalized) - model2")
-                plt.tight_layout()
-                plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model2_cm_norm.png"), dpi=200)
-                plt.close()
+        plt.figure(figsize=(6, 5))
+        plt.imshow(cm_plot, aspect="auto")
+        plt.colorbar()
+        plt.xlabel("pred")
+        plt.ylabel("gt")
+        plt.title(title)
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model2_cm.png"), dpi=200)
+        plt.close()
 
-        # model3
-        if "model3" in metrics:
-            m = metrics["model3"]
-            keys = [k for k in ["l2", "smoothl1"] if k in m]
-            plt.figure()
-            plt.bar(keys, [m[k] for k in keys])
-            plt.title("Test metrics - model3")
-            plt.tight_layout()
-            plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model3.png"), dpi=200)
-            plt.close()
+        # ---------------------------
+        # (2) Model1: violin de métricas por muestra (MSE + PSNR)
+        # ---------------------------
+        # MSE por muestra
+        mse_i = ((pred_img - gt_img)**2).mean(dim=(1,2,3))
+        eps = 1e-12
+        psnr_i = 10.0 * torch.log10((1.0 ** 2) / mse_i.clamp_min(eps))
+        ssim_out = []
+        for i in range(len(pred_img)):
+            ssim_out_i = ssim(pred_img[i], gt_img[i], data_range=1.0)
+            ssim_out.append(ssim_out_i)
+        ssim_i = torch.Tensor(ssim_out)
+        if isinstance(ssim_out, torch.Tensor) and ssim_out.ndim == 0:
+            # es escalar -> NO hay violin real
+            ssim_i = None
+        else:
+            ssim_i = ssim_out
+
+        plt.figure(figsize=(9, 8))
+        data = [mse_i.numpy(), psnr_i.numpy()]
+        labels = ["mse", "psnr"]
+        if ssim_i is not None:
+            data.insert(1, ssim_i.numpy())
+            labels.insert(1, "ssim")
+        plt.figure(figsize=(7, 4))
+        plt.violinplot(data, showmeans=True, showmedians=True)
+        plt.xticks(np.arange(1, len(labels)+1), labels)
+        plt.title("Model1 test metrics (per-sample)")
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model1_violin.png"), dpi=200)
+        plt.close()
+
+        # ---------------------------
+        # (3) Model3: violin de errores por muestra (L2 + SmoothL1)
+        # ---------------------------
+        l2_i = torch.norm(pred_cent - gt_cent, dim=1).numpy()
+
+        # SmoothL1 por muestra (por coordenada y luego media)
+        smoothl1_i = F.smooth_l1_loss(pred_cent, gt_cent, reduction="none").sum(dim=1).numpy()
+
+        plt.figure(figsize=(6, 4))
+        data = [l2_i, smoothl1_i]
+        plt.violinplot(data, showmeans=True, showmedians=True)
+        plt.xticks([1,2], ["l2", "smoothl1"])
+        plt.title("Model3 test metrics (per-sample)")
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model3_violin.png"), dpi=200)
+        plt.close()

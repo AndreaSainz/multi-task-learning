@@ -5,25 +5,6 @@ import torch
 from torch.nn import MSELoss
 import torch.nn.functional as F
 
-def soft_argmax_2d(heat_logits, beta=50.0):
-    """
-    heat_logits: (B,1,H,W) -> coords (B,2) en píxeles: (x, y)
-    beta: cuanto más alto, más “picudo” el softmax.
-    """
-    B, _, H, W = heat_logits.shape
-
-    # softmax sobre todos los píxeles
-    probs = F.softmax((beta * heat_logits).view(B, -1), dim=1).view(B, H, W)
-
-    xs = torch.linspace(0, W - 1, W, device=heat_logits.device)
-    ys = torch.linspace(0, H - 1, H, device=heat_logits.device)
-
-    # esperanza: sum_x p(x,y)*x ; sum_y p(x,y)*y
-    x_exp = (probs.sum(dim=1) * xs).sum(dim=1)  # (B,)
-    y_exp = (probs.sum(dim=2) * ys).sum(dim=1)  # (B,)
-
-    coords = torch.stack([x_exp, y_exp], dim=1)  # (B,2)
-    return coords, probs
 
 def compute_psnr(mse, max_val=1.0):
     """
