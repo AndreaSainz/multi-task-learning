@@ -37,7 +37,7 @@ class ProjectBase(Module):
         self.validation_path = None
         self.test_path = None
         
-        self.sigma = sigma
+
         self.max_len_train = None
         self.max_len_val = None
         self.max_len_test = None
@@ -77,10 +77,13 @@ class ProjectBase(Module):
         self.device = self.accelerator.device
 
         # Create tomosipo volume and projection geometry
-        self.vg = ts.volume(shape=(1,self.H,self.W))                            # Volumen
+        self.vg = ts.volume(shape=(1,self.H,self.W))                            # Volume
         self.angles = np.linspace(0, np.pi, self.num_angles, endpoint=True)     # Angles
         self.pg = ts.parallel(angles=self.angles, shape=(1, self.H))            # Parallel beam structure
-        self.A = ts.operator(self.vg,self.pg)         
+        self.A = ts.operator(self.vg,self.pg)  
+
+
+
    
     @staticmethod
     def show_samples(dataloader, save_path, n=5):
@@ -98,6 +101,7 @@ class ProjectBase(Module):
         plt.tight_layout()
         plt.savefig(save_path, dpi=200)
         plt.close()
+
 
 
 
@@ -139,7 +143,7 @@ class ProjectBase(Module):
             f"Pred c: ({pred_centres[i,0].item():.1f}, {pred_centres[i,1].item():.1f})"
             )
 
-            # texto dentro del panel (arriba-izquierda)
+            # text inside the left-image
             axes[i, 0].text(
                 0.02, 0.98, txt,
                 transform=axes[i, 0].transAxes,
@@ -173,9 +177,10 @@ class ProjectBase(Module):
         for c in range(self.num_classes):
             self._log(f"[{name}] class {c}: {counts[c].item()} ({100*counts[c].item()/max(1,total):.2f}%)")
 
-        # 2) show samples
+        # show samples
         if save_path is not None:
             self.show_samples(dataloader, save_path, n=n_show)
+
 
 
     def _setup_logger(self):
@@ -200,9 +205,12 @@ class ProjectBase(Module):
         return logger
 
 
+
     def _log(self, msg: str):
         if self.logger is not None:
             self.logger.info(msg)
+
+
 
     def _set_seed(self):
 
@@ -214,7 +222,18 @@ class ProjectBase(Module):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
     
-
+    def _normalize_per_image(self, x: torch.Tensor, eps: float = 1e-6):
+        """
+        Normaliza cada imagen del batch a [0,1] manteniendo contraste.
+        x: (B, C, H, W)
+        """
+        B = x.shape[0]
+        x_flat = x.view(B, -1)
+        x_min = x_flat.min(dim=1).values.view(B, 1, 1, 1)
+        x_max = x_flat.max(dim=1).values.view(B, 1, 1, 1)
+        x_norm = (x - x_min) / (x_max - x_min + eps)
+        return x_norm.clamp(0, 1)
+    
     def _get_dataloaders(self):
         
         # load training and validation datasets together from the training dataset
@@ -235,7 +254,7 @@ class ProjectBase(Module):
         if self.max_len_train is not None:
             n_train = min(self.max_len_train, n_total)
         else:
-            #por ejemplo, 90% train / 10% val
+            #90% train / 10% val
             n_train = int(0.9 * n_total)
 
 
@@ -254,6 +273,7 @@ class ProjectBase(Module):
         if n_rest > 0:
             lengths.append(n_rest)
 
+        #for reproducibility
         g_split = torch.Generator()
         g_split.manual_seed(self.seed)
         splits = random_split(data, lengths, generator=g_split)
@@ -261,15 +281,12 @@ class ProjectBase(Module):
         train_data = splits[0]
         val_data = splits[1]
 
-        # create dataloader for both and a generator for reproducibility
-        g = torch.Generator() 
-        g.manual_seed(self.seed)
-
+        # create dataloader for both 
         train_dataloader = DataLoader(
             train_data,
             batch_size=self.batch_size,
             shuffle=True,
-            generator=g)
+            generator=g_split)
 
         val_dataloader = DataLoader(
             val_data,
@@ -333,8 +350,8 @@ class ProjectBase(Module):
 
 
             # doing simultanious tasks
-            pred_1_detached = pred_1.detach()
             # classifier
+            pred_1_detached = self._normalize_per_image(pred_1.detach()) #NORMALIZAR IMAGEN DE ENTRADA PORQUE ES PRACTICAMENTE 0
             pred_2 = self.model2(pred_1_detached)
             loss_value_2 = loss2(pred_2, ground_truth_2)
 
@@ -342,17 +359,22 @@ class ProjectBase(Module):
             pred_3 = self.model3(pred_1_detached)
             loss_value_3 = loss3(pred_3, ground_truth_3)
 
-            
+            #check range of reconstructed image
+            if batch_id == 0 :
+                print(f"\n")
+                print(f"pred1 min/max: {e}", pred_1_detached.min().item(), pred_1_detached.max().item())
+                print(f"gt1   min/max: {e}", ground_truth_1.min().item(), ground_truth_1.max().item())
 
-            # printing examples to see how bad the reconstruction is, ONLY in the first epoch
+            # printing examples to see how bad the reconstruction is, ONLY in the fifth epoch
             if e+1 == min(self.epochs, 5) and batch_id == 0:
                 self.show_samples_train(ground_truth_1, pred_1_detached, ground_truth_2, pred_2, ground_truth_3, pred_3, n=5)
 
             # zero out the gradients, perform the backpropagation step, and update the weights
+
             # Model 1 is just a SIRT so it does not train
-                                                                #opt1.zero_grad()
-                                                                #self.accelerator.backward(loss_value_1)
-                                                                #opt1.step()
+            #opt1.zero_grad()
+            #self.accelerator.backward(loss_value_1)
+            #opt1.step()
 
             opt2.zero_grad()
             self.accelerator.backward(loss_value_2)
@@ -363,14 +385,14 @@ class ProjectBase(Module):
             self.accelerator.backward(loss_value_3)
             opt3.step()
 
+
             # update metrics
             self._update_metrics_state(
                 state, metrics_cfg,
                 pred_1, ground_truth_1,
                 pred_2, ground_truth_2,
                 pred_3, ground_truth_3,
-                data_range=1.0,
-                compute_train_mse=True)
+                data_range=1.0)
 
             # add the loss to the total training loss so far
             B = ground_truth_1.shape[0]
@@ -426,7 +448,7 @@ class ProjectBase(Module):
                 # make the predictions and calculate the validation loss
                 pred_1 = self.model1(input_data)
                 loss_value_1 = loss1(pred_1, ground_truth_1)
-                pred_1_detached = pred_1.detach()
+                pred_1_detached = self._normalize_per_image(pred_1.detach())
 
                 # doing simultanious tasks
                 # classifier
@@ -443,8 +465,7 @@ class ProjectBase(Module):
                     pred_1, ground_truth_1,
                     pred_2, ground_truth_2,
                     pred_3, ground_truth_3,
-                    data_range=1.0,
-                    compute_train_mse=False)
+                    data_range=1.0)
                 
                 # add the loss to the total validation loss so far 
                 B = ground_truth_1.shape[0]
@@ -489,25 +510,27 @@ class ProjectBase(Module):
         # load training and validation datasets
         train_dataloader, val_dataloader = self._get_dataloaders()
 
+        # debug: check balance, range and labels
         debug_train_loader = DataLoader(train_dataloader.dataset, batch_size=self.batch_size, shuffle=False)
         debug_val_loader   = DataLoader(val_dataloader.dataset,   batch_size=self.batch_size, shuffle=False)
         if self.debug:
             self.debug_loader(debug_train_loader, name="train", save_path="training_examples.png")
             self.debug_loader(debug_val_loader, name="val", save_path="validation_examples.png")
 
+
         # send models to device
         self.model1.to(self.device)
         self.model2.to(self.device)
         self.model3.to(self.device)
         
-        ######################################## INVERSE PROBLEM ALGORITHM ########################################
+        ############# INVERSE PROBLEM ALGORITHM #############
         
         # Loss function
         self.loss_fn_1 = MSELoss()
         loss1 = self.loss_fn_1
 
 
-        ######################################## CLASSIFIER ALGORITHM ########################################
+        ############# CLASSIFIER ALGORITHM #############
         # Get only parameters that have requires_grad=True
         trainable_params_2 = [p for p in self.model2.parameters() if p.requires_grad]
 
@@ -527,7 +550,7 @@ class ProjectBase(Module):
 
 
 
-        ######################################## FIND CENTER ALGORITHM ########################################
+        ############# FIND CENTER ALGORITHM #############
         # Get only parameters that have requires_grad=True
         trainable_params_3 = [p for p in self.model3.parameters() if p.requires_grad]
 
@@ -543,23 +566,26 @@ class ProjectBase(Module):
 
         # Loss function
         self.loss_fn_3 = SmoothL1Loss(reduction="mean")
-        loss3= self.loss_fn_3
+        loss3 = self.loss_fn_3
 
 
         # accelerates training
-        self.model1, train_dataloader, val_dataloader = self.accelerator.prepare(self.model1, train_dataloader, val_dataloader)
-        self.model2, opt2 = self.accelerator.prepare(self.model2, self.optimizer_2)
-        self.model3, opt3 = self.accelerator.prepare(self.model3, self.optimizer_3)
+        self.model1, train_dataloader, val_dataloader, self.model2, opt2, self.model3, opt3 = self.accelerator.prepare(self.model1, train_dataloader, val_dataloader,
+                                                                                    self.model2, self.optimizer_2,
+                                                                                    self.model3, self.optimizer_3)
         
         # initialize scheduler for learning rate
         if self.scheduler_2:
-            scheduler2 = ReduceLROnPlateau(opt2, mode='min', factor=0.5, patience=5)
+            scheduler2 = ReduceLROnPlateau(opt2, mode='min', factor=0.5, patience=3)
 
         if self.scheduler_3:
-            scheduler3 = ReduceLROnPlateau(opt3, mode='min', factor=0.5, patience=5)
+            scheduler3 = ReduceLROnPlateau(opt3, mode='min', factor=0.5, patience=3)
+
 
         # initialize a dictionary to store training history
         history = {
+            "train_metrics": [],
+            "val_metrics": [],
             "train_loss_1": [],
             "val_loss_1": [],
             "train_loss_2": [],
@@ -577,11 +603,11 @@ class ProjectBase(Module):
 
             # call the training function
             total_train_loss_1, total_train_loss_2, total_train_loss_3, train_metrics, n_train = self.train_one_epoch(train_dataloader, opt2, opt3, loss1, loss2, loss3, e)
-            history.setdefault("train_metrics", []).append(train_metrics)
+            history["train_metrics"].append(train_metrics)
 
             # call the validation function
             total_val_loss_1, total_val_loss_2, total_val_loss_3, val_metrics, n_val = self.validation(val_dataloader, loss1, loss2, loss3, e)
-            history.setdefault("val_metrics", []).append(val_metrics)
+            history["val_metrics"].append(val_metrics)
 
             # update our training history
             avg_train_loss_1 = total_train_loss_1 / n_train
@@ -602,8 +628,8 @@ class ProjectBase(Module):
                 self.save_checkpoint(epoch=e+1, history=history)
                 self._log(f"Checkpoint saved at epoch {e+1}")
 
+
             # update the learning rate scheduler (when the validation loss is not improving)
-        
             if self.scheduler_2:
                 scheduler2.step(avg_val_loss_2)
             
@@ -648,10 +674,10 @@ class ProjectBase(Module):
 
 
         # Save final metrics
-        with open(f'{self.model_path}_metrics.json', 'w') as f:
+        with open(f'{self.model_path}_train_metrics.json', 'w') as f:
             json.dump(history, f)
         
-        self._log(f"Final training history saved at {self.model_path}_metrics.json")
+        self._log(f"Final training history saved at {self.model_path}_train_metrics.json")
         self.save_checkpoint(epoch=epochs, history=history)
         self._log("Final checkpoint saved")
         self._log("=== TRAIN END ===")
@@ -694,14 +720,13 @@ class ProjectBase(Module):
                 input_data = batch["noisy_sinogram"]
 
                 
-
                 # make the predictions and calculate the validation loss
                 pred_1 = self.model1(input_data)
                 loss_value_1 = loss1(pred_1, ground_truth_1)
 
                 # doing simultanious tasks
                 # classifier
-                pred_1_detached = pred_1.detach()
+                pred_1_detached = self._normalize_per_image(pred_1.detach())
                 pred_2 = self.model2(pred_1_detached)
                 loss_value_2 = loss2(pred_2, ground_truth_2)
 
@@ -715,9 +740,7 @@ class ProjectBase(Module):
                     pred_1, ground_truth_1,
                     pred_2, ground_truth_2,
                     pred_3, ground_truth_3,
-                    data_range=1.0,
-                    compute_train_mse=False
-                )
+                    data_range=1.0)
                 
                 # add the loss to the total validation loss so far
                 B = ground_truth_1.shape[0]
@@ -726,8 +749,6 @@ class ProjectBase(Module):
                 total_test_loss_3 += loss_value_3.item()*B
                 n_samples += B
 
-                # checking that predictions and ground truth images have same shape
-                assert ground_truth_1.shape == pred_1.shape, f"[ERROR] Shape mismatch: predicted {pred_1.shape}, ground truth {ground_truth_1.shape}"
 
                 # save gound truth and prediction
                 img_pred.append(pred_1.cpu())
@@ -754,8 +775,8 @@ class ProjectBase(Module):
 
 
     def test(self, test_path=None, max_len_test=None):
-
         self._log("=== TEST START ===")
+
         #changing paths parameters
         self.test_path = test_path
         self.max_len_test = max_len_test
@@ -767,15 +788,16 @@ class ProjectBase(Module):
         # get test data loader
         test_dataloader = self._get_test_dataloaders()
 
+        #debug: checking balance, range and labels
         debug_test_loader   = DataLoader(test_dataloader.dataset,   batch_size=self.batch_size, shuffle=False)
         if self.debug:
             self.debug_loader(debug_test_loader, name="test", n_show=5, save_path="test_examples.png")
 
         
         #initialice accelerator
-        self.model1, test_dataloader = self.accelerator.prepare(self.model1, test_dataloader)
-        self.model2 = self.accelerator.prepare(self.model2)
-        self.model3 = self.accelerator.prepare(self.model3)
+        self.model1, test_dataloader, self.model2, self.model3 = self.accelerator.prepare(self.model1, test_dataloader,
+                                                                                            self.model2,
+                                                                                            self.model3)
 
         loss1 = self.loss_fn_1
         loss2 = self.loss_fn_2
@@ -832,9 +854,9 @@ class ProjectBase(Module):
             state, metrics_cfg
         """
         metrics_cfg = {
-            "model1": ["mse", "psnr", "ssim", ],          # CT recon
-            "model2": ["classifier_metrics"],    # classifier
-            "model3": ["l2", "smoothl1"],        # center regression
+            "model1": ["mse", "psnr", "ssim"],      # CT recon
+            "model2": ["classifier_metrics"],       # classifier
+            "model3": ["l2", "smoothl1"],           # center regression
         }
 
         state = {
@@ -845,7 +867,7 @@ class ProjectBase(Module):
 
         return state, metrics_cfg
 
-    def _update_metrics_state(self, state, metrics_cfg, pred_1, gt_1, pred_2, gt_2, pred_3, gt_3, data_range=1.0, compute_train_mse=False):
+    def _update_metrics_state(self, state, metrics_cfg, pred_1, gt_1, pred_2, gt_2, pred_3, gt_3, data_range=1.0):
         """
         Updates metric accumulators for a batch.
         """
@@ -945,12 +967,12 @@ class ProjectBase(Module):
 
     def save_checkpoint(self, epoch, history):
 
-        # 1) config JSON
+        # config JSON
         cfg_path = f"{self.model_path}_config.json"
         with open(cfg_path, "w") as f:
             json.dump(self._get_config(), f, indent=2)
 
-        # 2) checkpoint torch
+        # checkpoint torch
         ckpt = {
             "epoch": epoch,
             "model1_state": self.accelerator.unwrap_model(self.model1).state_dict(),
@@ -983,6 +1005,7 @@ class ProjectBase(Module):
                 self.optimizer_2.load_state_dict(ckpt["optimizer2_state"])
             if self.optimizer_3 is not None and ckpt.get("optimizer3_state") is not None:
                 self.optimizer_3.load_state_dict(ckpt["optimizer3_state"])
+
 
         # restaura RNG (opcional, para reproducibilidad)
         rs = ckpt.get("rng_state", None)
@@ -1080,6 +1103,7 @@ class ProjectBase(Module):
         plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_ALL_models_summary.png"), dpi=200)
         plt.close()
     
+
     def plot_test_per_model(self, out_dir=None, normalize_cm=True):
         if out_dir is None:
             out_dir = os.path.dirname(self.model_path) or "."
@@ -1088,22 +1112,18 @@ class ProjectBase(Module):
         with open(f"{self.model_path}_test_metrics.json", "r") as f:
             results = json.load(f)
 
+        # --- Carga tensores guardados en test() ---
+        # (Si quieres quitar warnings, cambia weights_only=False -> True)
+        pred_img = torch.load(f"{self.model_path}_predictions_images.pt", map_location="cpu", weights_only=False)  # (N,1,H,W)
+        gt_img   = torch.load(f"{self.model_path}_ground_truth_images.pt", map_location="cpu", weights_only=False)
 
-        # Carga tensores guardados en test()
-        pred_img = torch.load(f"{self.model_path}_predictions_images.pt", map_location="cpu")   # (N,1,H,W)
-        gt_img   = torch.load(f"{self.model_path}_ground_truth_images.pt", map_location="cpu")
+        pred_logits = torch.load(f"{self.model_path}_predictions_labels.pt", map_location="cpu", weights_only=False)  # (N,C)
+        gt_labels   = torch.load(f"{self.model_path}_ground_truth_labels.pt", map_location="cpu", weights_only=False) # (N,)
 
-        pred_logits = torch.load(f"{self.model_path}_predictions_labels.pt", map_location="cpu")  # (N,C)
-        gt_labels   = torch.load(f"{self.model_path}_ground_truth_labels.pt", map_location="cpu") # (N,)
+        pred_cent = torch.load(f"{self.model_path}_predictions_centers.pt", map_location="cpu", weights_only=False)   # (N,2)
+        gt_cent   = torch.load(f"{self.model_path}_ground_truth_centers.pt", map_location="cpu", weights_only=False)  # (N,2)
 
-        pred_cent = torch.load(f"{self.model_path}_predictions_centers.pt", map_location="cpu")   # (N,2)
-        gt_cent   = torch.load(f"{self.model_path}_ground_truth_centers.pt", map_location="cpu")  # (N,2)
-
-        
-
-        # ---------------------------
-        # (1) Model2: UNA confusion matrix
-        # ---------------------------
+        # --- Model2: confusion matrix ---
         cm = np.asarray(results["metrics"]["model2"]["confusion_matrix"], dtype=np.float32)
         if normalize_cm:
             cm_plot = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1e-12)
@@ -1122,50 +1142,43 @@ class ProjectBase(Module):
         plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model2_cm.png"), dpi=200)
         plt.close()
 
-        # ---------------------------
-        # (2) Model1: violin de métricas por muestra (MSE + PSNR)
-        # ---------------------------
-        # MSE por muestra
-        mse_i = ((pred_img - gt_img)**2).mean(dim=(1,2,3))
-        eps = 1e-12
-        psnr_i = 10.0 * torch.log10((1.0 ** 2) / mse_i.clamp_min(eps))
-        ssim_out = []
-        for i in range(len(pred_img)):
-            ssim_out_i = ssim(pred_img[i], gt_img[i], data_range=1.0)
-            ssim_out.append(ssim_out_i)
-        ssim_i = torch.Tensor(ssim_out)
-        if isinstance(ssim_out, torch.Tensor) and ssim_out.ndim == 0:
-            # es escalar -> NO hay violin real
-            ssim_i = None
-        else:
-            ssim_i = ssim_out
+        # --- Model1: per-sample MSE / PSNR / SSIM violin ---
+        # IMPORTANTE: SSIM/PSNR asumen data_range=1.0 -> clamp a [0,1]
+        pred_img = pred_img.clamp(0, 1)
+        gt_img   = gt_img.clamp(0, 1)
 
-        plt.figure(figsize=(9, 8))
-        data = [mse_i.numpy(), psnr_i.numpy()]
-        labels = ["mse", "psnr"]
-        if ssim_i is not None:
-            data.insert(1, ssim_i.numpy())
-            labels.insert(1, "ssim")
+        mse_i = ((pred_img - gt_img) ** 2).mean(dim=(1, 2, 3))  # (N,)
+        eps = 1e-12
+        psnr_i = 10.0 * torch.log10((1.0 ** 2) / mse_i.clamp_min(eps))  # (N,)
+
+        # SSIM vectorizado: devuelve (N,) si size_average=False
+        ssim_i = ssim(pred_img, gt_img, data_range=1.0, size_average=False)  # (N,)
+
+        data = [
+            mse_i.detach().cpu().numpy(),
+            ssim_i.detach().cpu().numpy(),
+            psnr_i.detach().cpu().numpy(),
+        ]
+        labels = ["mse", "ssim", "psnr"]
+
         plt.figure(figsize=(7, 4))
         plt.violinplot(data, showmeans=True, showmedians=True)
-        plt.xticks(np.arange(1, len(labels)+1), labels)
+        plt.xticks(np.arange(1, len(labels) + 1), labels)
         plt.title("Model1 test metrics (per-sample)")
         plt.tight_layout()
         plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model1_violin.png"), dpi=200)
         plt.close()
 
-        # ---------------------------
-        # (3) Model3: violin de errores por muestra (L2 + SmoothL1)
-        # ---------------------------
-        l2_i = torch.norm(pred_cent - gt_cent, dim=1).numpy()
+        # --- Model3: per-sample L2 / SmoothL1 violin ---
+        pred_cent = pred_cent.float()
+        gt_cent   = gt_cent.float()
 
-        # SmoothL1 por muestra (por coordenada y luego media)
-        smoothl1_i = F.smooth_l1_loss(pred_cent, gt_cent, reduction="none").sum(dim=1).numpy()
+        l2_i = torch.norm(pred_cent - gt_cent, dim=1).detach().cpu().numpy()  # (N,)
+        smoothl1_i = F.smooth_l1_loss(pred_cent, gt_cent, reduction="none").sum(dim=1).detach().cpu().numpy()  # (N,)
 
         plt.figure(figsize=(6, 4))
-        data = [l2_i, smoothl1_i]
-        plt.violinplot(data, showmeans=True, showmedians=True)
-        plt.xticks([1,2], ["l2", "smoothl1"])
+        plt.violinplot([l2_i, smoothl1_i], showmeans=True, showmedians=True)
+        plt.xticks([1, 2], ["l2", "smoothl1"])
         plt.title("Model3 test metrics (per-sample)")
         plt.tight_layout()
         plt.savefig(os.path.join(out_dir, f"{os.path.basename(self.model_path)}_test_model3_violin.png"), dpi=200)
