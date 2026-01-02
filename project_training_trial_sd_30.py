@@ -83,8 +83,8 @@ exp.model2 = ClassifierNet(10)        # clasificador MNIST
 exp.model3 = CenterRegressor(H,W)     # centro (x, y)
 
 
-history = exp.train(max_len_train = 10000, max_len_val = 2000)
-results = exp.test(max_len_test = 2000)
+history = exp.train(max_len_train = None, max_len_val = None)
+results = exp.test(max_len_test = None)
 
 exp.plot_per_model_metrics(history, out_dir=save_path)
 exp.plot_test_per_model(out_dir=save_path)
