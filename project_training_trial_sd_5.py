@@ -21,9 +21,9 @@ epochs = 20
 H = 100
 W = 100
 dimension = (H, W)
-num_angles = 30
+num_angles = 5
 sigma = 0.01
-standard_dose = False
+standard_dose = True
 cut = False
 seed = 29072000
 optimizer_type = ("AdamW", "AdamW")
@@ -58,10 +58,10 @@ torch.backends.cudnn.benchmark = False
 if torch.cuda.is_available():
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-save_path = "/home/as3628/multi-task-learning/results/experiment_ld_30"     
+save_path = "/home/as3628/multi-task-learning/results/experiment_sd_5"     
 
 exp = ProjectBase(
-    model_path=f"{save_path}/mnist_ct_experiment_ld_30",
+    model_path=f"{save_path}/mnist_ct_experiment_sd_5",
     dimension=dimension,
     num_angles=num_angles,
     sigma=sigma,
