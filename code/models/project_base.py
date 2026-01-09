@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 
 class ProjectBase(Module):
     
-    def __init__(self, model_path, dimension, num_angles, sigma, standard_dose, cut, seed, batch_size, epochs, optimizer_type, learning_rate, debug,  accelerator,  scheduler = (True,True)):
+    def __init__(self, model_path, dimension, num_angles, sigma, i_0, cut, seed, batch_size, epochs, optimizer_type, learning_rate, debug,  accelerator,  scheduler = (True,True)):
         super().__init__()
 
                                                                              
@@ -51,7 +51,7 @@ class ProjectBase(Module):
         self.H, self.W = self.dimension
         self.num_angles = num_angles
         self.sigma = sigma
-        self.standard_dose = standard_dose
+        self.i_0 = i_0
         self.cut = cut
         self.seed = seed
         self.epochs = epochs
@@ -243,7 +243,7 @@ class ProjectBase(Module):
                 dimension = self.dimension, 
                 num_angles = self.num_angles, 
                 sigma = self.sigma,
-                standard_dose = self.standard_dose,
+                i_0 = self.i_0,
                 cut = self.cut,
                 seed = self.seed,
                 max_len = None,
@@ -304,7 +304,7 @@ class ProjectBase(Module):
                 dimension = self.dimension, 
                 num_angles = self.num_angles, 
                 sigma = self.sigma,
-                standard_dose = self.standard_dose,
+                i_0 = self.i_0,
                 cut = self.cut,
                 seed = self.seed,
                 max_len = self.max_len_test,
@@ -351,7 +351,7 @@ class ProjectBase(Module):
 
             # doing simultanious tasks
             # classifier
-            pred_1_detached = self._normalize_per_image(pred_1.detach()) #NORMALIZAR IMAGEN DE ENTRADA PORQUE ES PRACTICAMENTE 0
+            pred_1_detached = pred_1.detach() 
             pred_2 = self.model2(pred_1_detached)
             loss_value_2 = loss2(pred_2, ground_truth_2)
 
@@ -448,7 +448,7 @@ class ProjectBase(Module):
                 # make the predictions and calculate the validation loss
                 pred_1 = self.model1(input_data)
                 loss_value_1 = loss1(pred_1, ground_truth_1)
-                pred_1_detached = self._normalize_per_image(pred_1.detach())
+                pred_1_detached = pred_1.detach()
 
                 # doing simultanious tasks
                 # classifier
@@ -726,7 +726,7 @@ class ProjectBase(Module):
 
                 # doing simultanious tasks
                 # classifier
-                pred_1_detached = self._normalize_per_image(pred_1.detach())
+                pred_1_detached = pred_1.detach()
                 pred_2 = self.model2(pred_1_detached)
                 loss_value_2 = loss2(pred_2, ground_truth_2)
 
@@ -944,7 +944,7 @@ class ProjectBase(Module):
             "dimension": list(self.dimension),
             "num_angles": self.num_angles,
             "sigma": self.sigma,
-            "standard_dose": self.standard_dose,
+            "i_0": self.i_0,
             "cut": self.cut,
             "seed": self.seed,
             "batch_size": self.batch_size,

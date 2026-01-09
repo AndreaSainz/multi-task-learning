@@ -29,7 +29,7 @@ their parallel-beam projections with realistic noise:
 
 class MnistDataset(Dataset):
 
-    def __init__(self, training, testing, A, dimension=(50, 50), num_angles=60, sigma = 0.1, standard_dose = True, cut = False,  seed = 29072000, max_len = None,  device="cuda"):
+    def __init__(self, training, testing, A, dimension=(50, 50), num_angles=60, sigma = 0.1, i_0 = 10**5, cut = False,  seed = 29072000, max_len = None,  device="cuda"):
         """
         Initialize the MNIST CT dataset.
 
@@ -85,11 +85,7 @@ class MnistDataset(Dataset):
         self.H, self.W = self.dimension
         self.num_angles = num_angles
         self.sigma = sigma
-        
-        if standard_dose:
-            self.i_0 = 10**5
-        else:
-            self.i_0 = 10**5/4
+        self.i_0 = i_0
 
         self.cut = cut
         self.seed = seed
@@ -300,7 +296,7 @@ class MnistDataset(Dataset):
         sinogram = self.A(im_prim)
 
         # adding noise
-        noisy_sino = self.noise(sinogram, g)
+        noisy_sino = self.noise(sinogram, g) * self.i_0
 
         return {'noisy_sinogram': noisy_sino,  
             'ground_truth_image': im_prim,
