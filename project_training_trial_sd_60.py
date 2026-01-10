@@ -17,13 +17,13 @@ accelerator = Accelerator()
 
 #parameter values
 batch_size = 10
-epochs = 2
+epochs = 20
 H = 100
 W = 100
 dimension = (H, W)
-num_angles = 10
+num_angles = 60
 sigma = 0.01
-i_0 = 10**3
+i_0 = 10
 cut = False
 seed = 29072000
 optimizer_type = ("AdamW", "AdamW")
@@ -58,10 +58,10 @@ torch.backends.cudnn.benchmark = False
 if torch.cuda.is_available():
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-save_path = "/home/as3628/multi-task-learning/results/experiment_10^3_10"     
+save_path = "/home/as3628/multi-task-learning/results/experiment_10^3_60"     
 
 exp = ProjectBase(
-    model_path=f"{save_path}/mnist_ct_experiment_10^3_10",
+    model_path=f"{save_path}/mnist_ct_experiment_10^3_60",
     dimension=dimension,
     num_angles=num_angles,
     sigma=sigma,
@@ -83,8 +83,8 @@ exp.model2 = ClassifierNet(10)        # clasificador MNIST
 exp.model3 = CenterRegressor(H,W)     # centro (x, y)
 
 
-history = exp.train(max_len_train = 100, max_len_val = 20)
-results = exp.test(max_len_test = 20)
+history = exp.train(max_len_train = None, max_len_val = None)
+results = exp.test(max_len_test = None)
 
 exp.plot_per_model_metrics(history, out_dir=save_path)
 exp.plot_test_per_model(out_dir=save_path)
