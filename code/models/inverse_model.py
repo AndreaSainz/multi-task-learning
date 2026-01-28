@@ -21,7 +21,7 @@ class ReconNet(nn.Module):
         self.A_torch  = to_autograd(A,   is_2d=True, num_extra_dims=2)
         self.AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
         
-        # Parámetros aprendibles: un alpha por iteración
+        # alpha as a constant
         self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
 
     def forward(self, y):
