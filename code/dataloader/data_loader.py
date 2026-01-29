@@ -301,7 +301,8 @@ class MnistDataset(Dataset):
 
         
 
-        return {'noisy_sinogram': noisy_sino,  
+        return {'mnist_image': img,
+            'noisy_sinogram': noisy_sino,  
             'ground_truth_image': im_prim,
             'label': label,
             'centre': torch.tensor(center, dtype=torch.float32)}
