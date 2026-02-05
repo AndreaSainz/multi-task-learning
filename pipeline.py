@@ -286,7 +286,7 @@ def model(y, batch_id):
 
             # getting the F value and its gradient
             F = - sigma**2 * log_mu
-            grad_F = torch.autograd.grad(F, x, create_graph=False)[0]
+            grad_F = torch.autograd.grad(F, x, create_graph=False)[0] # REVISAR ESTA PARTE
 
             # grad descent on total => x <- x - alpha * grad_F
             x = x - alpha * grad_F
