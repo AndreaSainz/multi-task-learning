@@ -31,10 +31,10 @@ n_train = 500
 batch_size = 10
 
 ### training
-T = 10
-I = 10
-alpha = 1e-6
-sigma = 0.1                   ## tengo que probar comomafecta este sigma al entrnamiento y a las imagenes reconstruidas
+T = 50
+I = 50
+alpha = 1e-8
+sigma = 100             ## tengo que probar comomafecta este sigma al entrnamiento y a las imagenes reconstruidas
 
 # Import data
 
@@ -96,7 +96,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler(os.path.join(log_dir, "first_try.log")),
+        logging.FileHandler(os.path.join(log_dir, "second_try.log")),
         logging.StreamHandler()
     ]
 )
@@ -186,7 +186,7 @@ for d in range(10):
     ax.imshow(proto1[d,0].cpu(), cmap="gray")
     ax.set_title(str(d))
     ax.axis("off")
-plt.savefig("proto.png")
+plt.savefig("proto_second.png")
 plt.close()
 
 
@@ -229,7 +229,7 @@ def model(y, batch_id):
     if batch_id == 0:
         plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
         plt.colorbar()
-        plt.savefig("first_sirt_image.png", dpi=300, bbox_inches="tight")
+        plt.savefig("first_sirt_image_second.png", dpi=300, bbox_inches="tight")
         plt.close()
 
     # x for only SIRT
@@ -239,13 +239,13 @@ def model(y, batch_id):
     digit = torch.randint(0, 10, (B,), device=y.device)
 
     if batch_id == 0:
-        logger.info(f"Original digit: {digit}")
+        logger.info(f"First digit: {digit}")
 
     # CENTER
     centre = torch.randint(14, 86, (B, 2), device=y.device)
 
     if batch_id == 0:
-        logger.info(f"Original centre: {centre}")
+        logger.info(f"First centre: {centre}")
 
 
     images.append(x.detach().cpu())
@@ -277,7 +277,7 @@ def model(y, batch_id):
             if batch_id == 0 and i == 5:
                 plt.imshow(crop_x[0,0].detach().cpu().numpy(), cmap="gray")
                 plt.colorbar()
-                plt.savefig("crop_image.png", dpi=300, bbox_inches="tight")
+                plt.savefig("crop_image_second.png", dpi=300, bbox_inches="tight")
                 plt.close()
 
             # calculate the value of mu() in this cropeed image         
@@ -298,15 +298,16 @@ def model(y, batch_id):
             AT_r_sirt = AT_torch(r_sirt)
             x_sirt = x_sirt + alpha * AT_r_sirt
 
-        if batch_id == 0 and i == 5:
+
+        if batch_id == 0 and i % 5== 0:
             plt.imshow(x_sirt[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig("fith_sirt_image.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"{i}_sirt_image_second.png", dpi=300, bbox_inches="tight")
             plt.close()
 
             plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig("fith_sirt_flow_image.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"{i}_sirt_flow_image_second.png", dpi=300, bbox_inches="tight")
             plt.close()
 
 
@@ -344,9 +345,9 @@ def model(y, batch_id):
         centre = centre_new
 
 
-        if batch_id == 0 and i == 5:
-            logger.info(f"Fith digit: {digit}")
-            logger.info(f"Fith centre: {centre}")
+        if batch_id == 0 and i % 5 == 0:
+            logger.info(f"{i}th digit: {digit}")
+            logger.info(f"{i}th centre: {centre}")
 
         #save information
         images.append(x.detach().cpu())
@@ -372,6 +373,10 @@ for batch_id, batch in enumerate(train_dataloader):
     ground_truth_3 = batch["centre"]
     input_data = batch["noisy_sinogram"]
 
+    if batch_id == 0 :
+        logger.info(f"Original digit: {ground_truth_2}")
+        logger.info(f"original centre: {ground_truth_3}")
+
     images, images_SIRT, centers, digits = model(input_data, batch_id)
 
     gt_images.append(ground_truth_1)
@@ -394,4 +399,4 @@ results = {
     "model_centers": model_centers,
     }
 
-torch.save(results, "/home/as3628/multi-task-learning/results/results_mnist_ct.pt")
+torch.save(results, "/home/as3628/multi-task-learning/results/results_mnist_ct_second.pt")
