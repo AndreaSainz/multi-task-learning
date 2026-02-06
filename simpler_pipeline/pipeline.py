@@ -114,10 +114,13 @@ for d in range(10):
 
 
 # Import trained mu(x_cropped|digit)
-#mu_model = cinn_model.model.to(device)
-#ckpt = torch.load("mnist_cINN.pt", map_location=device)
-#mu_model.load_state_dict(ckpt['net'])
-#mu_model.eval()
+#mu_model = nf.MultiscaleFlow(q0, flows, merges)
+#mu_model = mu_model.to(device)
+
+#checkpoint = torch.load("flow_model.pt", map_location=device)
+#mu_model.load_state_dict(checkpoint["model_state_dict"])
+
+#mu_model.eval() 
 #for p in mu_model.parameters():
 #    p.requires_grad_(False)
 

@@ -3,22 +3,23 @@ import torch
 import torchvision as tv
 import numpy as np
 import normflows as nf
-from tv.datasets import MNIST
-import tv.transforms as transforms
+from torchvision.datasets import MNIST
+import torchvision.transforms as transforms
 from matplotlib import pyplot as plt
 from tqdm import tqdm
+import math
 
 # Set up model
 
 # Define flows
-L = 3 #number of latent variables (z_l)
-K = 16 #how complex the invertible function is
+L = 2 #number of latent variables (z_l)
+K = 24 #how complex the invertible function is
 torch.manual_seed(29072000)
 
 input_shape = (1, 28, 28)
 n_dims = np.prod(input_shape)
 channels = 1
-hidden_channels = 256 #how large are CNN inside GlowBlocks, so s() and t()
+hidden_channels = 512 #how large are CNN inside GlowBlocks, so s() and t()
 split_mode = 'channel'
 scale = True
 num_classes = 10
@@ -53,7 +54,7 @@ enable_cuda = True
 device = torch.device('cuda' if torch.cuda.is_available() and enable_cuda else 'cpu')
 model = model.to(device)
 
-# Prepare training data
+# # Prepare training data
 batch_size = 128
 
 transform = tv.transforms.Compose([tv.transforms.ToTensor(), nf.utils.Scale(255. / 256.), nf.utils.Jitter(1 / 256.)])
@@ -61,6 +62,7 @@ train_data = MNIST(root = 'data/', train = True, transform = transform)
 
 train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True,
                                            drop_last=True)
+
 
 test_data = MNIST(root = 'data/', train = False, transform = transform)
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size)
@@ -74,6 +76,7 @@ max_iter = 100000
 loss_hist = np.array([])
 
 optimizer = torch.optim.Adamax(model.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20000, gamma=0.5)
 
 for i in tqdm(range(max_iter)):
     try:
@@ -87,6 +90,7 @@ for i in tqdm(range(max_iter)):
     if ~(torch.isnan(loss) | torch.isinf(loss)):
         loss.backward()
         optimizer.step()
+        scheduler.step()
 
     loss_hist = np.append(loss_hist, loss.detach().to('cpu').numpy())
 
@@ -95,11 +99,24 @@ for i in tqdm(range(max_iter)):
 plt.figure(figsize=(10, 10))
 plt.plot(loss_hist, label='loss')
 plt.legend()
-plt.savefig("loss_hist_normalizing_flows.png")
+plt.savefig("loss_hist_normalizing_flows_2.png")
 
+#saving model
+save_path = "flow_model_2.pt"
+
+torch.save({
+    "model_state_dict": model.state_dict(),
+}, save_path)
+
+
+
+ 
 
 # Model samples
 num_sample = 10
+model.eval()
+
+
 
 with torch.no_grad():
     y = torch.arange(num_classes).repeat(num_sample).to(device)
@@ -107,4 +124,17 @@ with torch.no_grad():
     x_ = torch.clamp(x, 0, 1)
     plt.figure(figsize=(10, 10))
     plt.imshow(np.transpose(tv.utils.make_grid(x_, nrow=num_classes).cpu().numpy(), (1, 2, 0)))
-    plt.savefig("sample_normalizing_flows.png")
+    plt.savefig("sample_normalizing_flows_2.png")
+
+
+# Get bits per dim
+n = 0
+bpd_cum = 0
+with torch.no_grad():
+    for x, y in iter(test_loader):
+        nll = model(x.to(device), y.to(device))
+        nll_np = nll.cpu().numpy() 
+        bpd_cum += np.nansum(nll_np / np.log(2) / n_dims + 8)
+        n += len(x) - np.sum(np.isnan(nll_np))
+        
+    print('Bits per dim: ', bpd_cum / n)
