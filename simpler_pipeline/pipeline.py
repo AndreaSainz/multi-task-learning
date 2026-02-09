@@ -34,7 +34,7 @@ save_batch_id = 0
 T = 50
 I = 50
 alpha = 1e-8
-sigma = 1e-4             ## tengo que probar comomafecta este sigma al entrnamiento y a las imagenes reconstruidas
+sigma = 1e-6            ## tengo que probar comomafecta este sigma al entrnamiento y a las imagenes reconstruidas
 
 # Import data
 
@@ -114,96 +114,38 @@ for d in range(10):
 
 
 # Import trained mu(x_cropped|digit)
-#mu_model = nf.MultiscaleFlow(q0, flows, merges)
-#mu_model = mu_model.to(device)
+mu_model = nf.MultiscaleFlow(q0, flows, merges)
+mu_model = mu_model.to(device)
 
-#checkpoint = torch.load("flow_model.pt", map_location=device)
-#mu_model.load_state_dict(checkpoint["model_state_dict"])
+checkpoint = torch.load("flow_model_2.pt", map_location=device)
+mu_model.load_state_dict(checkpoint["model_state_dict"])
 
-#mu_model.eval() 
-#for p in mu_model.parameters():
-#    p.requires_grad_(False)
+mu_model.eval() 
+for p in mu_model.parameters():
+   p.requires_grad_(False)
 
 
 #function tu get the term that we expect
-#def logpx_digit(x, digit):
-#    """
-#    Compute exact log p(x | digit) for a conditional normalizing flow (cINN).
-#
-#    x:     [B, 1, 28, 28] float tensor
-#    digit: [B] int64 tensor with values in {0,...,9}
-#
-#    Returns:
-#        log_px: [B] tensor with log p(x | digit)
-#    """
-#    # the mu_model expects the digit as 1-hot vector
-#    digit = digit.long()
-#    cond = F.one_hot(digit, num_classes=10).float().to(x.device)
+def logpx_digit(x, cond):
+   """
+   Compute exact log p(x | cond) for a conditional normalizing flow (cINN).
 
-#    #the model gives you the original z and the logarithm of the determinan of the jacobian
-#    z, log_jac = mu_model(x, cond, rev=False)
-#    z = z.view(z.shape[0], -1)
+   x:     [B, 1, 28, 28] float tensor
+   cond: [B, 10] probability vector
 
-#    # using the equation from normalizing flow we can calculate the log p(x|cond) = log p(z) + log det(Jacobian)
-#    D = z.shape[1]
-#    log_pz = -0.5 * (z**2).sum(dim=1) - 0.5 * D * math.log(2*math.pi)
+   Returns:
+       log_px: [B] tensor with log p(x | cond)
+   """
+   
+   #the model gives you the original z and the logarithm of the determinan of the jacobian
+   z, log_jac = mu_model(x, cond, rev=False)
+   z = z.view(z.shape[0], -1)
 
-#    return log_pz + log_jac
+   # using the equation from normalizing flow we can calculate the log p(x|cond) = log p(z) + log det(Jacobian)
+   D = z.shape[1]
+   log_pz = -0.5 * (z**2).sum(dim=1) - 0.5 * D * math.log(2*math.pi)
 
-def compute_prototypes(train_dataloader, device="cpu"):
-    """
-    train_dataset: dataset que devuelve dict con clave 'label' y
-                   una imagen MNIST original (28x28) o accesible.
-    Returns:
-        proto: [10, 1, 28, 28]
-    """
-    proto_sum = torch.zeros(10, 1, 28, 28, device=device)
-    counts = torch.zeros(10, device=device)
-
-    for i in range(len(train_dataloader)):
-        sample = train_dataloader[i]
-
-        digit = int(sample["label"])
-        
-        # OJO: aquí necesitamos la imagen MNIST ORIGINAL (28x28),
-        # no el canvas 100x100 ni el sinograma.
-        # Ajusta la key si en tu dataset se llama distinto.
-        img = sample["mnist_image"]      # [1,28,28]
-        
-        proto_sum[digit] += img
-        counts[digit] += 1
-
-    # evitar división por cero
-    for d in range(10):
-        if counts[d] > 0:
-            proto_sum[d] /= counts[d]
-
-    return proto_sum
-
-proto1 = compute_prototypes(balanced_train, device=device)
-
-
-fig, axs = plt.subplots(2, 5, figsize=(10,4))
-for d in range(10):
-    ax = axs[d//5, d%5]
-    ax.imshow(proto1[d,0].cpu(), cmap="gray")
-    ax.set_title(str(d))
-    ax.axis("off")
-plt.savefig("simpler_pipeline/results/proto_second.png")
-plt.close()
-
-
-def logpx_digit(crop_x, digit, proto, sigma_p=0.2):
-    """
-    crop_x: [B,1,28,28]
-    digit:  [B] long
-    proto:  [10,1,28,28]
-    """
-    digit = digit.long()
-    mu_d = proto[digit]                 # [B,1,28,28]
-    diff = crop_x - mu_d
-    sq = (diff**2).sum(dim=(1,2,3))     # [B]
-    return -0.5 * sq / (sigma_p**2)     # constante omitida
+   return log_pz + log_jac
 
 
 
@@ -240,6 +182,7 @@ def model(y, batch_id):
 
     # DIGIT
     digit = torch.randint(0, 10, (B,), device=y.device)
+    digit = torch.nn.functional.one_hot(digit, num_classes=10).float()
 
     if batch_id == 0:
         logger.info(f"First digit: {digit}")
@@ -284,12 +227,11 @@ def model(y, batch_id):
                 plt.close()
 
             # calculate the value of mu() in this cropeed image         
-            log_mu = logpx_digit(crop_x, digit, proto1)            
-            log_mu = log_mu.sum()                         
+            log_mu = logpx_digit(crop_x, digit)                                    
 
             # getting the F value and its gradient
             F = - sigma**2 * log_mu
-            grad_F = torch.autograd.grad(F, x, create_graph=False)[0] # REVISAR ESTA PARTE
+            grad_F = torch.autograd.grad(F, x, create_graph=False)[0] # REVISAR ESTA PARTE (ver si genera no 0)
             if batch_id == 0 and i % 5== 0:
                 plt.imshow(grad_F[0,0].detach().cpu().numpy(), cmap="gray")
                 plt.colorbar()
@@ -327,13 +269,25 @@ def model(y, batch_id):
             for i_x in range(14,86):
                 for i_y in range(14,86):
                     crop_x = x[:, :, i_y-14:i_y+14, i_x-14:i_x+14]
-                    map_x[:, i_y,i_x] =  logpx_digit(crop_x, digit, proto1).view(B)
+                    map_x[:, i_y,i_x] =  logpx_digit(crop_x, digit).view(B)
 
-        flat_idx = map_x.view(B, -1).argmax(dim=1)  # [B]
+        flat = map_x.view(B, -1)
+        flat = flat - flat.max(dim=1, keepdim=True).values
+        w = torch.softmax(flat, dim=1)
 
-        ys = flat_idx // W
-        xs = flat_idx % W
-        centre_new = torch.stack([ys, xs], dim=1)
+        ys = torch.arange(H, device=map_x.device)
+        xs = torch.arange(W, device=map_x.device)
+        Y, X = torch.meshgrid(ys, xs, indexing="ij")
+        coords = torch.stack([Y.flatten(), X.flatten()], dim=0)  # [2, H*W]
+
+        mean = (w.unsqueeze(1) * coords.unsqueeze(0)).sum(dim=2)  # [B, 2]
+
+        diff = coords.unsqueeze(0) - mean.unsqueeze(2)
+        var = (w.unsqueeze(1) * diff**2).sum(dim=2)  # [B, 2]
+        sigma = 1/var
+        centre_new = mean.round().long()
+        centre_new[:,0] = centre_new[:,0].clamp(14, 85)
+        centre_new[:,1] = centre_new[:,1].clamp(14, 85)
 
 
         # digit 
@@ -347,14 +301,14 @@ def model(y, batch_id):
             map_digit = torch.full((B, 10), -torch.inf, device=y.device)
             for d in range(0,10):
                 d_vec = torch.full((B,), d, dtype=torch.long, device=y.device)
-                map_digit[:, d] =  logpx_digit(crop_x, digit, proto1).view(B)
+                map_digit[:, d] =  logpx_digit(crop_x, digit).view(B)
 
-        digit = map_digit.argmax(dim=1)
+        digit = map_digit
         centre = centre_new
 
 
         if batch_id == 0 and i % 5 == 0:
-            logger.info(f"{i}th digit: {digit}")
+            logger.info(f"{i}th digit: {map_digit}")
             logger.info(f"{i}th centre: {centre}")
 
         #save information

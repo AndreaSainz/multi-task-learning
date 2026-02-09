@@ -9,6 +9,21 @@ from matplotlib import pyplot as plt
 from tqdm import tqdm
 import math
 
+
+def check_params_finite(model):
+    for p in model.parameters():
+        if p is not None and p.data is not None and not torch.isfinite(p.data).all():
+            return False
+    return True
+
+def grad_finite(model):
+    for p in model.parameters():
+        if p.grad is not None and not torch.isfinite(p.grad).all():
+            return False
+    return True
+
+clip_c = 5.0
+
 # Set up model
 
 # Define flows
@@ -71,11 +86,11 @@ train_iter = iter(train_loader)
 
 
 # Train model
-max_iter = 100000
+max_iter = 1000
 
 loss_hist = np.array([])
 
-optimizer = torch.optim.Adamax(model.parameters(), lr=1e-3, weight_decay=1e-5)
+optimizer = torch.optim.Adamax(model.parameters(), lr=5e-4, weight_decay=1e-5)
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20000, gamma=0.5)
 
 for i in tqdm(range(max_iter)):
@@ -86,23 +101,40 @@ for i in tqdm(range(max_iter)):
         x, y = next(train_iter)
     optimizer.zero_grad()
     loss = model.forward_kld(x.to(device), y.to(device))
-        
-    if ~(torch.isnan(loss) | torch.isinf(loss)):
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
+    
+    # 1) loss finita
+    if not torch.isfinite(loss).item():
+        print(f"[iter {i}] loss no-finita: {loss.item()}")
+        break
 
-    loss_hist = np.append(loss_hist, loss.detach().to('cpu').numpy())
+    # backward
+    loss.backward()
 
+    # 2) gradientes finitos (opcional pero recomendable)
+    if not grad_finite(model):
+        print(f"[iter {i}] gradientes no-finitos -> STOP")
+        break
+
+    # clip + step
+    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_c)
+    optimizer.step()
+    scheduler.step()
+
+    # 3) parámetros finitos tras el step
+    if not check_params_finite(model):
+        print(f"[iter {i}] parámetros no-finitos tras optimizer.step() -> STOP")
+        break
+
+    loss_hist = np.append(loss_hist, loss.detach().cpu().numpy())
 
 
 plt.figure(figsize=(10, 10))
 plt.plot(loss_hist, label='loss')
 plt.legend()
-plt.savefig("loss_hist_normalizing_flows_2.png")
+plt.savefig("loss_hist_normalizing_flows_3.png")
 
 #saving model
-save_path = "flow_model_2.pt"
+save_path = "flow_model_3.pt"
 
 torch.save({
     "model_state_dict": model.state_dict(),
@@ -124,7 +156,7 @@ with torch.no_grad():
     x_ = torch.clamp(x, 0, 1)
     plt.figure(figsize=(10, 10))
     plt.imshow(np.transpose(tv.utils.make_grid(x_, nrow=num_classes).cpu().numpy(), (1, 2, 0)))
-    plt.savefig("sample_normalizing_flows_2.png")
+    plt.savefig("sample_normalizing_flows_3.png")
 
 
 # Get bits per dim
@@ -133,6 +165,10 @@ bpd_cum = 0
 with torch.no_grad():
     for x, y in iter(test_loader):
         nll = model(x.to(device), y.to(device))
+
+        print("finite ratio:", torch.isfinite(nll).float().mean().item())
+        print("min/max:", nll.min().item(), nll.max().item())
+
         nll_np = nll.cpu().numpy() 
         bpd_cum += np.nansum(nll_np / np.log(2) / n_dims + 8)
         n += len(x) - np.sum(np.isnan(nll_np))
