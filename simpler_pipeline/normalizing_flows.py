@@ -22,7 +22,19 @@ def grad_finite(model):
             return False
     return True
 
-clip_c = 5.0
+def evaluate_nll(model, loader):
+    model.eval()
+    total = 0.0
+    n = 0
+    with torch.no_grad():
+        for x, y in loader:
+            logp = model(x.to(device), y.to(device))
+            total += (-logp).sum().item()
+            n += x.size(0)
+    model.train()
+    return total / n
+
+clip_c = 50
 
 # Set up model
 
@@ -38,6 +50,7 @@ hidden_channels = 512 #how large are CNN inside GlowBlocks, so s() and t()
 split_mode = 'channel'
 scale = True
 num_classes = 10
+eval_every = 800
 
 # Set up flows, distributions and merge operations
 q0 = []
@@ -86,12 +99,14 @@ train_iter = iter(train_loader)
 
 
 # Train model
-max_iter = 1000
+max_iter = 100000
 
 loss_hist = np.array([])
 
-optimizer = torch.optim.Adamax(model.parameters(), lr=5e-4, weight_decay=1e-5)
-scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20000, gamma=0.5)
+optimizer = torch.optim.Adamax(model.parameters(), lr=7e-4, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode="min", factor=0.5, patience=3, threshold=1e-3, verbose=True
+)
 
 for i in tqdm(range(max_iter)):
     try:
@@ -118,7 +133,9 @@ for i in tqdm(range(max_iter)):
     # clip + step
     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_c)
     optimizer.step()
-    scheduler.step()
+    if i % eval_every == 0:
+        val_loss = evaluate_nll(model, test_loader)  
+        scheduler.step(val_loss)
 
     # 3) parámetros finitos tras el step
     if not check_params_finite(model):

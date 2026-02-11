@@ -297,7 +297,7 @@ class MnistDataset(Dataset):
         sinogram = self.A(im_prim)
 
         # adding noise
-        noisy_sino = self.noise(sinogram, g) * self.constant
+        noisy_sino = self.noise(sinogram, g) 
 
         
 
