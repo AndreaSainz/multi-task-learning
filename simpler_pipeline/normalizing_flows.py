@@ -8,6 +8,31 @@ import torchvision.transforms as transforms
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 import math
+import logging
+import os
+from datetime import datetime
+
+# ---- logging setup ----
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
+
+log_file = os.path.join(
+    log_dir, 
+    f"nf_train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()   # sigue imprimiendo en consola
+    ]
+)
+
+logger = logging.getLogger(__name__)
+logger.info("Training started")
+
 
 
 def check_params_finite(model):
@@ -34,23 +59,23 @@ def evaluate_nll(model, loader):
     model.train()
     return total / n
 
-clip_c = 50
 
 # Set up model
 
 # Define flows
-L = 2 #number of latent variables (z_l)
-K = 24 #how complex the invertible function is
+L = 2               #number of latent variables (z_l)
+K = 24              #how complex the invertible function is
 torch.manual_seed(29072000)
 
 input_shape = (1, 28, 28)
 n_dims = np.prod(input_shape)
 channels = 1
-hidden_channels = 512 #how large are CNN inside GlowBlocks, so s() and t()
+hidden_channels = 256           #how large are CNN inside GlowBlocks, so s() and t()
 split_mode = 'channel'
 scale = True
 num_classes = 10
 eval_every = 800
+ckpt_every = 2000
 
 # Set up flows, distributions and merge operations
 q0 = []
@@ -97,16 +122,19 @@ test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size)
 
 train_iter = iter(train_loader)
 
+x,y = next(iter(test_loader))
+x,y = x.to(device), y.to(device)
+print("forward_kld:", model.forward_kld(x,y).item())
+print("-mean logp:", (-model(x,y).mean()).item())
+print("mean logp:", model(x,y).mean().item())
 
 # Train model
-max_iter = 100000
+max_iter = 50000
 
 loss_hist = np.array([])
 
-optimizer = torch.optim.Adamax(model.parameters(), lr=7e-4, weight_decay=1e-5)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode="min", factor=0.5, patience=3, threshold=1e-3, verbose=True
-)
+optimizer = torch.optim.Adam(model.parameters(), lr=2e-4, betas=(0.9,0.999))
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20000, gamma=0.5)
 
 for i in tqdm(range(max_iter)):
     try:
@@ -119,19 +147,28 @@ for i in tqdm(range(max_iter)):
     
     # 1) loss finita
     if not torch.isfinite(loss).item():
-        print(f"[iter {i}] loss no-finita: {loss.item()}")
+        logger.error(f"[iter {i}] loss no-finita: {loss.item()}")
         break
 
     # backward
     loss.backward()
 
+    total_norm = torch.norm(
+    torch.stack([torch.norm(p.grad.detach(), 2) 
+                 for p in model.parameters() 
+                 if p.grad is not None]), 
+    2
+    )
+
+    #print("Global grad norm:", total_norm.item())
+
     # 2) gradientes finitos (opcional pero recomendable)
     if not grad_finite(model):
-        print(f"[iter {i}] gradientes no-finitos -> STOP")
+        logger.error(f"[iter {i}] gradientes no-finitos -> STOP")
         break
 
+
     # clip + step
-    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_c)
     optimizer.step()
     if i % eval_every == 0:
         val_loss = evaluate_nll(model, test_loader)  
@@ -139,25 +176,33 @@ for i in tqdm(range(max_iter)):
 
     # 3) parámetros finitos tras el step
     if not check_params_finite(model):
-        print(f"[iter {i}] parámetros no-finitos tras optimizer.step() -> STOP")
+        logger.error(f"[iter {i}] parámetros no-finitos tras optimizer.step() -> STOP")
         break
 
     loss_hist = np.append(loss_hist, loss.detach().cpu().numpy())
+
+    
+    if i % ckpt_every == 0 and i > 0:
+        torch.save({"iter": i, "model_state_dict": model.state_dict(),
+                    "opt_state_dict": optimizer.state_dict()}, 
+                os.path.join(log_dir, f"ckpt_{i}.pt"))
+
+
+
+
 
 
 plt.figure(figsize=(10, 10))
 plt.plot(loss_hist, label='loss')
 plt.legend()
-plt.savefig("loss_hist_normalizing_flows_3.png")
+plt.savefig("loss_hist_normalizing_flows_1.png")
 
 #saving model
-save_path = "flow_model_3.pt"
+save_path = "flow_model_1.pt"
 
 torch.save({
     "model_state_dict": model.state_dict(),
 }, save_path)
-
-
 
  
 
@@ -173,7 +218,7 @@ with torch.no_grad():
     x_ = torch.clamp(x, 0, 1)
     plt.figure(figsize=(10, 10))
     plt.imshow(np.transpose(tv.utils.make_grid(x_, nrow=num_classes).cpu().numpy(), (1, 2, 0)))
-    plt.savefig("sample_normalizing_flows_3.png")
+    plt.savefig("sample_normalizing_flows_1.png")
 
 
 # Get bits per dim
@@ -186,8 +231,20 @@ with torch.no_grad():
         print("finite ratio:", torch.isfinite(nll).float().mean().item())
         print("min/max:", nll.min().item(), nll.max().item())
 
-        nll_np = nll.cpu().numpy() 
-        bpd_cum += np.nansum(nll_np / np.log(2) / n_dims + 8)
-        n += len(x) - np.sum(np.isnan(nll_np))
-        
-    print('Bits per dim: ', bpd_cum / n)
+        bpd = (nll / (np.log(2) * n_dims) + 8)  # [B]
+
+        bpd_cum += torch.nan_to_num(bpd, nan=0.0).sum().item()
+        n += torch.isfinite(bpd).sum().item()
+
+final_bpd = bpd_cum / n
+logger.info(f"Final Bits per dim: {final_bpd}")
+print("Bits per dim:", final_bpd)
+
+for h in list(logger.handlers):
+    try:
+        h.flush()
+        h.close()
+    finally:
+        logger.removeHandler(h)
+
+logging.shutdown()

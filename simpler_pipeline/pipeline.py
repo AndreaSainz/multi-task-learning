@@ -33,9 +33,9 @@ save_batch_id = 0
 k = int(0.05 * H * W)   # top 5%
 
 ### training
-T = 10
+T = 30
 I = 30
-alpha = 1e-4
+alpha = 1e-3
 sigma_value = 1e-6  ## tengo que probar comomafecta este sigma al entrnamiento y a las imagenes reconstruidas
 gamma = 0.5
 
@@ -50,7 +50,7 @@ A = ts.operator(vg,pg)
 # this is for normalizing the operator
 x_ref = torch.ones(1,H,W, device=device)
 y_ref = A(x_ref)
-scale = y_ref.abs().max()
+scale_fact = y_ref.abs().max()
 
 
 A_raw  = to_autograd(A,   is_2d=True, num_extra_dims=2)
@@ -58,10 +58,10 @@ AT_raw = to_autograd(A.T, is_2d=True, num_extra_dims=2)
 
 # define normalized operators
 def A_torch(x):
-    return A_raw(x) / scale
+    return A_raw(x) / scale_fact
 
 def AT_torch(y):
-    return AT_raw(y) / scale
+    return AT_raw(y) / scale_fact
 
 data = MnistDataset(training = True,
                 testing= False, 
@@ -359,19 +359,18 @@ def model(y, batch_id):
         # Compute weighted variance in y and x, then average to get a scalar "spread"
         diff = coords.unsqueeze(0) - mean.unsqueeze(2)                # [B, 2, H*W]
         var_xy = (w_thr.unsqueeze(1) * diff.pow(2)).sum(dim=2)        # [B, 2]
-        var_s = var_xy.mean(dim=1, keepdim=True)  # [B,1]
-        delta = torch.log(var_prev + 1e-8) - torch.log(var_s + 1e-8)
-        sigma = sigma * torch.exp(gamma * delta)                      # [B, 1]
+        var_s = var_xy.mean(dim=1, keepdim=True) / ((H/2)**2)  # [B,1]
 
+        sigma0 = sigma_value
         if var_prev is None:
             var_prev = var_s.detach()
         else:
-            delta = torch.log(var_prev + 1e-8) - torch.log(var_s + 1e-8)
-            sigma = sigma * torch.exp(gamma * delta)
+            improve = (var_s < var_prev)   # mejora si var baja
 
-            # estabilidad
-            sigma = torch.clamp(sigma, 1e-8, 1e-3)
+            ratio = (var_prev / var_s).clamp(1.0, 2.0)  # solo deja aumentar
+            sigma_up = (sigma * ratio.pow(gamma)).clamp(sigma0, 1e-2)
 
+            sigma = torch.where(improve, sigma_up, torch.full_like(sigma, sigma0))
             var_prev = var_s.detach()
 
 
@@ -426,7 +425,7 @@ for batch_id, batch in enumerate(train_dataloader):
     ground_truth_1 = batch["ground_truth_image"]
     ground_truth_2 = batch["label"]
     ground_truth_3 = batch["centre"]
-    input_data = batch["noisy_sinogram"]
+    input_data = batch["noisy_sinogram"]/scale_fact
 
     if batch_id == 0 :
         logger.info(f"Original digit: {ground_truth_2}")
