@@ -15,54 +15,51 @@ import logging
 import os
 from torch.utils.data import Subset
 import normflows as nf
+from collections import Counter
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Subset
 
-# Parameters
+
+
+
+
+###################################################################### Parameters #####################################################################
 
 ### data
 seed = 29072000
 H = 100
 W = 100
-num_angles = 30
-i_0 = 10
-sigma_data = 0.1
-accelerator = Accelerator()
+num_angles = 60
+i_0 = 10**5
+sigma_data = 0.5
+
+
+### training parameters
+T = 30
+I = 10
+alpha = 1/(53.595951080322266)**2 #1/(liptchitz constant)^2
+beta = 1e-8
 device = "cuda"
-n_train = 100
+n_train = 20
 batch_size = 10
 save_batch_id = 0
 k = int(0.05 * H * W)   # top 5%
 
-### training
-T = 30
-I = 30
-alpha = 1e-3
-sigma_value = 1e-6  ## tengo que probar comomafecta este sigma al entrnamiento y a las imagenes reconstruidas
-gamma = 0.5
 
-# Import data
+###################################################################### Data #####################################################################
 
 # define CT geometry
-vg = ts.volume(shape=(1,H,W))                            # Volume
+vg = ts.volume(shape=(1,H,W))                                 # Volume
 angles = np.linspace(0, np.pi, num_angles, endpoint=True)     # Angles
-pg = ts.parallel(angles=angles, shape=(1, H))            # Parallel beam structure
+pg = ts.parallel(angles=angles, shape=(1, H))                 # Parallel beam structure
 A = ts.operator(vg,pg)
 
-# this is for normalizing the operator
-x_ref = torch.ones(1,H,W, device=device)
-y_ref = A(x_ref)
-scale_fact = y_ref.abs().max()
+
+A_torch  = to_autograd(A,   is_2d=True, num_extra_dims=2)
+AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
 
 
-A_raw  = to_autograd(A,   is_2d=True, num_extra_dims=2)
-AT_raw = to_autograd(A.T, is_2d=True, num_extra_dims=2)
-
-# define normalized operators
-def A_torch(x):
-    return A_raw(x) / scale_fact
-
-def AT_torch(y):
-    return AT_raw(y) / scale_fact
-
+# Import data
 data = MnistDataset(training = True,
                 testing= False, 
                 A = A, 
@@ -78,30 +75,28 @@ data = MnistDataset(training = True,
 #for reproducibility
 g_split = torch.Generator()
 g_split.manual_seed(seed)
-splits = random_split(data,[n_train, len(data)-n_train] , generator=g_split)
+labels = np.array([data[i]["label"] for i in range(len(data))])
 
-train_data = splits[0]
+# Split estratificado
+train_idx, val_idx = train_test_split(
+    np.arange(len(data)),
+    train_size=n_train,
+    stratify=labels,
+    random_state=seed
+)
 
-# be sure all digits are equally represented
-labels = torch.tensor([train_data[i]["label"] for i in range(len(train_data))])
+train_data = Subset(data, train_idx)
 
-idx_by_class = [torch.where(labels == k)[0] for k in range(10)]
-min_count = min(len(ix) for ix in idx_by_class)
-
-balanced_idx = torch.cat([ix[:min_count] for ix in idx_by_class])
-# mix 
-balanced_idx = balanced_idx[torch.randperm(len(balanced_idx), generator=g_split)]
-
-balanced_train = Subset(train_data, balanced_idx.tolist())
 
 # create dataloader
 train_dataloader = DataLoader(
-    balanced_train,
+    train_data,
     batch_size=batch_size,
     shuffle=True,
     generator=g_split)
 
 
+###################################################################### Logger #####################################################################
 # create logger for checkpoints
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
@@ -110,7 +105,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler(os.path.join(log_dir, "second_try.log")),
+        logging.FileHandler(os.path.join(log_dir, "sigma_no constant_try.log")),
         logging.StreamHandler()
     ]
 )
@@ -119,7 +114,7 @@ logger = logging.getLogger(__name__)
 
 
 #Check if the dataset is balanced
-labels_bal = torch.tensor([balanced_train[i]["label"] for i in range(len(balanced_train))])
+labels_bal = torch.tensor([train_data[i]["label"] for i in range(len(train_data))])
 counts = torch.bincount(labels_bal, minlength=10)
 
 logger.info("Balanced dataset label counts:")
@@ -127,16 +122,18 @@ for d in range(10):
     logger.info(f"Digit {d}: {counts[d].item()}")
 
 
+###################################################################### Trained NF Model #####################################################################
+
 # Import trained mu(x_cropped|digit)
 # Define flows
-L = 2 #number of latent variables (z_l)
-K = 24 #how complex the invertible function is
+L = 2               #number of latent variables (z_l)
+K = 24              #how complex the invertible function is
 torch.manual_seed(29072000)
 
 input_shape = (1, 28, 28)
 n_dims = np.prod(input_shape)
 channels = 1
-hidden_channels = 512 #how large are CNN inside GlowBlocks, so s() and t()
+hidden_channels = 256           #how large are CNN inside GlowBlocks, so s() and t()
 split_mode = 'channel'
 scale = True
 num_classes = 10
@@ -164,7 +161,7 @@ for i in range(L):
 mu_model = nf.MultiscaleFlow(q0, flows, merges)
 mu_model = mu_model.to(device)
 
-checkpoint = torch.load("flow_model_3.pt", map_location=device)
+checkpoint = torch.load("flow_model_1.pt", map_location=device)
 mu_model.load_state_dict(checkpoint["model_state_dict"])
 
 mu_model.eval() 
@@ -174,7 +171,71 @@ for p in mu_model.parameters():
 
 
 
-# defining the whole idea of the inverse problem
+
+###################################################################### Center finder function #####################################################################
+def score_centers_with_unfold(model, img, digit_cond, *, H=100, W=100, patch=28,
+                              ymin=14, ymax=85, xmin=14, xmax=85,
+                              chunk_size=512):
+    """
+    Devuelve map_x con scores (log-prob o -NLL) para cada centro (y,x) válido.
+    - x: [B,1,H,W]
+    - digit_cond: lo que espere tu mu_model 
+    - map_x: [B,H,W] con -inf fuera de la zona válida
+    """
+
+    device = img.device
+    B, C, Hx, Wx = img.shape
+    assert Hx == H and Wx == W and C == 1
+    assert patch % 2 == 0
+    rad = patch // 2
+
+    # 1) Extrae TODOS los patches 28x28 como vistas (sin copiar):
+    # patches: [B, C, out_h, out_w, patch, patch]
+    patches = img.unfold(2, patch, 1).unfold(3, patch, 1)
+
+    out_h = H - patch + 1   # 73 si H=100, patch=28
+    out_w = W - patch + 1   # 73
+
+    # Centro (cy,cx) corresponde a esquina sup izq (ty,tx) = (cy-rad, cx-rad)
+    ty_min, ty_max = ymin - rad, ymax - rad  # 0..71 si ymin=14,ymax=85,rad=14
+    tx_min, tx_max = xmin - rad, xmax - rad  # 0..71
+
+    # Recorta solo la región válida
+    patches = patches[:, :, ty_min:ty_max+1, tx_min:tx_max+1, :, :]
+    # Ahora patches: [B,1,72,72,28,28]  (si rango 14..85)
+
+    gh, gw = patches.shape[2], patches.shape[3]  # 72,72
+    N = gh * gw  # 5184
+
+    # 2) Flatten a batch grande: [B*N,1,28,28]
+    patches_flat = patches.contiguous().view(B * N, 1, patch, patch)
+
+    # 3) Evalúa mu_model en chunks
+    scores_flat = torch.empty(B * N, device=device, dtype=torch.float32)
+
+    for start in range(0, B * N, chunk_size):
+        end = min(start + chunk_size, B * N)
+        p = patches_flat[start:end]
+
+        # Repite el condicionamiento de dígito para cada patch
+        cond = digit_cond
+        cond_rep = cond.repeat_interleave(N, dim=0)[start:end]
+        
+        # Score de cada patch
+        scores_flat[start:end] = (- model(p, cond_rep).view(-1)).float()
+
+    # 4) Reshape a [B,72,72] y colócalo en map_x [B,H,W]
+    scores_grid = scores_flat.view(B, gh, gw)
+
+    map_x = torch.full((B, H, W), -torch.inf, device=device, dtype=scores_grid.dtype)
+
+    # Pon scores en las posiciones de centros válidas: cy=ymin..ymax, cx=xmin..xmax
+    map_x[:, ymin:ymax+1, xmin:xmax+1] = scores_grid
+
+    return map_x
+
+###################################################################### Multi-task function #####################################################################
+
 def model(y, batch_id):
     images_SIRT = []
     images = []
@@ -182,14 +243,13 @@ def model(y, batch_id):
     digits = []
 
     B = y.shape[0]
-    sigma = torch.full((B,1), sigma_value, device=y.device) 
 
 
-    # Initilizing tasks
+    ##### Initilizing tasks
+
 
     # RECONSTRUCTION
     x = torch.zeros(B, 1, H, W, device=y.device)
-
 
     for t in range(T):
         Ax = A_torch(x)
@@ -205,6 +265,12 @@ def model(y, batch_id):
 
     # x for only SIRT
     x_sirt = x.clone()
+
+    if batch_id == 0 :
+        plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
+        plt.colorbar()
+        plt.savefig(f"simpler_pipeline/results/x_second.png", dpi=300, bbox_inches="tight")
+        plt.close()
 
     # DIGIT
     digit = torch.randint(0, 10, (B,), device=y.device)
@@ -225,8 +291,7 @@ def model(y, batch_id):
     centers.append(centre.detach().cpu())
     digits.append(digit.detach().cpu())
 
-    # model loop
-    var_prev = None
+    ###### model loop
 
     for i in range(I):
 
@@ -234,8 +299,21 @@ def model(y, batch_id):
         for t in range(T):
             Ax = A_torch(x)
             r = y - Ax
+
+            if batch_id == 0 and i % 5== 0 and t == 0:
+                plt.imshow(r[0,0].detach().cpu().numpy(), cmap="gray")
+                plt.colorbar()
+                plt.savefig(f"simpler_pipeline/results/{i}_r_second.png", dpi=300, bbox_inches="tight")
+                plt.close()
+
             AT_r = AT_torch(r)
             x = x + alpha * AT_r
+
+            if batch_id == 0 and i % 5== 0 and t == 0:
+                plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
+                plt.colorbar()
+                plt.savefig(f"simpler_pipeline/results/{i}_x_second.png", dpi=300, bbox_inches="tight")
+                plt.close()
 
             # regularization term F
             x = x.detach()
@@ -260,14 +338,29 @@ def model(y, batch_id):
                 plt.close()
 
             # calculate the value of mu() in this cropeed image         
-            log_mu = mu_model(crop_x, digit).view(B, 1)                                    
+            log_mu = - mu_model(crop_x, digit).view(B, 1)      # es nll                               
 
             # getting the F value and its gradient
-            F = - (sigma**2) * log_mu
-            loss_reg = F.sum()
+            F =  (sigma_data**2) * log_mu.sum()
 
-            grad_crop = torch.autograd.grad(loss_reg, crop_x, create_graph=False)[0] # REVISAR ESTA PARTE (ver si genera no 0)
-            grad_F = torch.zeros_like(x)
+            grad_crop = torch.autograd.grad(F, crop_x, create_graph=False)[0] 
+
+            if batch_id == 0 and i % 5== 0:
+                plt.imshow(grad_crop[0,0].detach().cpu().numpy(), cmap="gray")
+                plt.colorbar()
+                plt.savefig(f"simpler_pipeline/results/{i}_grad_crop_second.png", dpi=300, bbox_inches="tight")
+                plt.close()
+
+            #x_scaled = x.clone()
+            #scale = grad_crop.norm() / (x_scaled.norm() + 1e-8)
+            #x_scaled = x_scaled * scale
+            grad_F = - x.clone() #x_scale
+
+            if batch_id == 0 and i % 5== 0:
+                plt.imshow(grad_F[0,0].detach().cpu().numpy(), cmap="gray")
+                plt.colorbar()
+                plt.savefig(f"simpler_pipeline/results/{i}_grad_x_second.png", dpi=300, bbox_inches="tight")
+                plt.close()
 
             for b in range(B):
                 cy = int(centre[b, 0].item())
@@ -280,10 +373,10 @@ def model(y, batch_id):
                 plt.savefig(f"simpler_pipeline/results/{i}_grad_F_second.png", dpi=300, bbox_inches="tight")
                 plt.close()
 
-            # grad descent on total => x <- x - alpha * grad_F
-            x = x -  alpha * grad_F
+            # grad descent on total => x <- x - beta * grad_F
+            beta_i = beta * (5 ** i)
+            x = x + beta_i * grad_F
 
-            
             #only SIRT
             Ax_sirt = A_torch(x_sirt)
             r_sirt = y - Ax_sirt
@@ -308,17 +401,17 @@ def model(y, batch_id):
 
         #center 
         with torch.no_grad():
-             # map_x[b, y, x] will store a "score" for placing the 28x28 crop center at (y, x).
+            # map_x[b, y, x] will store a "score" for placing the 28x28 crop center at (y, x).
             # We only fill valid centers (14..85) so the crop stays inside the 100x100 image.
-            map_x = torch.full((B, H, W), -torch.inf, device=y.device)
-            for i_x in range(14,86):
-                for i_y in range(14,86):
-                    # Extract the 28x28 patch if the center were (i_y, i_x)
-                    crop_x = x[:, :, i_y-14:i_y+14, i_x-14:i_x+14]
-
-                    # Score the patch under the digit-conditional flow
-                    # NOTE: the '-' assumes mu_model returns NLL; if it returns log_prob, remove the minus.
-                    map_x[:, i_y,i_x] =  mu_model(crop_x, digit).view(B)
+            map_x = map_x = score_centers_with_unfold(
+                            model =mu_model,
+                            img = x,
+                            digit_cond=digit,          
+                            H=H, W=W,
+                            patch=28,
+                            ymin=14, ymax=85, xmin=14, xmax=85,
+                            chunk_size=512  # prueba 256/512/1024 según memoria
+                        )
 
         # Flatten the (H,W) grid into a vector of length H*W so we can do softmax/topk per batch element
         flat = map_x.view(B, -1)
@@ -329,52 +422,12 @@ def model(y, batch_id):
         # Convert scores into a probability distribution over all centers
         w = torch.softmax(flat, dim=1)  # shape: [B, H*W]
 
-        # --- TOP-K SELECTION (keep only the k most probable centers) ---
         # Get indices of the k largest scores (equivalently, highest probabilities after softmax)
         topk_vals, topk_idx = w.topk(k, dim=1)  # shapes: [B,k], [B,k]
 
         # The MAP center within the top-k is simply the best of those k (the first one from topk)
         best_idx = topk_idx[:, 0]  # shape: [B]
 
-        # Build a binary mask that is 1 at the top-k indices, 0 elsewhere
-        mask = torch.zeros_like(w)           # [B, H*W]
-        mask.scatter_(1, topk_idx, 1.0)      # set top-k positions to 1
-
-        # Truncate the distribution: keep probability mass only on top-k, zero out the rest
-        w_thr = w * mask
-
-        # Renormalize so w_thr sums to 1 (avoid division by zero with a small clamp)
-        w_thr = w_thr / w_thr.sum(dim=1, keepdim=True).clamp(min=1e-12)
-
-        # --- MEAN / VARIANCE COMPUTATION ON THE TRUNCATED (TOP-K) DISTRIBUTION ---
-        # Build a coordinate grid for all pixels, flattened to match the H*W indexing
-        ys = torch.arange(H, device=map_x.device)
-        xs = torch.arange(W, device=map_x.device)
-        Y, X = torch.meshgrid(ys, xs, indexing="ij")
-        coords = torch.stack([Y.flatten(), X.flatten()], dim=0)  # [2, H*W], coords[0]=y, coords[1]=x
-
-        # Compute the (y,x) expectation under the truncated distribution
-        mean = (w_thr.unsqueeze(1) * coords.unsqueeze(0)).sum(dim=2)  # [B, 2]
-
-        # Compute weighted variance in y and x, then average to get a scalar "spread"
-        diff = coords.unsqueeze(0) - mean.unsqueeze(2)                # [B, 2, H*W]
-        var_xy = (w_thr.unsqueeze(1) * diff.pow(2)).sum(dim=2)        # [B, 2]
-        var_s = var_xy.mean(dim=1, keepdim=True) / ((H/2)**2)  # [B,1]
-
-        sigma0 = sigma_value
-        if var_prev is None:
-            var_prev = var_s.detach()
-        else:
-            improve = (var_s < var_prev)   # mejora si var baja
-
-            ratio = (var_prev / var_s).clamp(1.0, 2.0)  # solo deja aumentar
-            sigma_up = (sigma * ratio.pow(gamma)).clamp(sigma0, 1e-2)
-
-            sigma = torch.where(improve, sigma_up, torch.full_like(sigma, sigma0))
-            var_prev = var_s.detach()
-
-
-        # --- MAP CENTER (argmax) AS THE NEW DISCRETE CENTER ---
         # Convert best_idx (flattened index) back to (y, x)
         cy = best_idx // W
         cx = best_idx %  W
@@ -393,14 +446,14 @@ def model(y, batch_id):
             map_digit = torch.full((B, 10), -torch.inf, device=y.device)
             for d in range(0,10):
                 d_vec = torch.full((B,), d, dtype=torch.long, device=y.device) #it could be one hot or one digit for this model
-                map_digit[:, d] =  mu_model(crop_x, d_vec).view(B)
+                map_digit[:, d] =  - mu_model(crop_x, d_vec).view(B)
 
         digit = torch.softmax(map_digit, dim=1)
         centre = centre_new
 
 
         if batch_id == 0 and i % 5 == 0:
-            logger.info(f"{i}th digit: {map_digit.argmax(dim=1)}")
+            logger.info(f"{i}th digit: {digit}")
             logger.info(f"{i}th centre: {centre}")
 
         #save information
@@ -411,6 +464,9 @@ def model(y, batch_id):
 
     return images, images_SIRT, centers, digits
 
+
+
+###################################################################### training part #####################################################################
 
 gt_images = []
 gt_digits = []
@@ -425,7 +481,7 @@ for batch_id, batch in enumerate(train_dataloader):
     ground_truth_1 = batch["ground_truth_image"]
     ground_truth_2 = batch["label"]
     ground_truth_3 = batch["centre"]
-    input_data = batch["noisy_sinogram"]/scale_fact
+    input_data = batch["noisy_sinogram"]
 
     if batch_id == 0 :
         logger.info(f"Original digit: {ground_truth_2}")
@@ -453,7 +509,9 @@ results = {
     "model_centers": model_centers,
     }
 
+
 torch.save(results, "simpler_pipeline/results/results_mnist_ct_second.pt")
+
 
 for h in list(logger.handlers):
     try:
