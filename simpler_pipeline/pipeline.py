@@ -35,10 +35,10 @@ sigma_data = 0.5
 
 
 ### training parameters
-T = 30
-I = 10
-alpha = 1/(53.595951080322266)**2 #1/(liptchitz constant)^2
-beta = 1e-8
+T = 20
+I = 5
+alpha = 1e-4/(53.595951080322266)**2 #1/(liptchitz constant)^2
+beta = 5e-8
 device = "cuda"
 n_train = 20
 batch_size = 10
@@ -250,27 +250,49 @@ def model(y, batch_id):
 
     # RECONSTRUCTION
     x = torch.zeros(B, 1, H, W, device=y.device)
+    
+
+    if batch_id == 0:
+        dx_norm_mean = torch.zeros(T, device=y.device)
+        dx_norm_b0 = torch.zeros(T, device=y.device)  # una muestra
 
     for t in range(T):
+        x_prev = x
         Ax = A_torch(x)
         r = y - Ax
         AT_r = AT_torch(r)
-        x = x + alpha * AT_r
+        step_data = alpha * AT_r
+        if batch_id ==0:
+            logger.info(f"Gradient descent step -1_{t}: {step_data.flatten(1).norm(dim=1)}")
+        x = x + step_data
+
+        # debugging || x^{k+1} -x^k||
+        if batch_id == 0:
+            dx = x - x_prev
+            dx_norm_b0[t]   = dx[0].flatten().norm()
+            dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()
+            
+    if batch_id == 0:
+        plt.figure()
+        plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
+        plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
+        plt.yscale("log")
+        plt.xlabel("t")
+        plt.ylabel("$||x_{t+1}-x_t||$")
+        plt.legend()
+        plt.savefig("simpler_pipeline/results/initial_dx_norm_batch0.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
 
     if batch_id == 0:
         plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
         plt.colorbar()
-        plt.savefig("simpler_pipeline/results/first_sirt_image_second.png", dpi=300, bbox_inches="tight")
+        plt.savefig("simpler_pipeline/results/first_sirt_image.png", dpi=300, bbox_inches="tight")
         plt.close()
 
     # x for only SIRT
+    x = x.clamp(0,1)
     x_sirt = x.clone()
-
-    if batch_id == 0 :
-        plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
-        plt.colorbar()
-        plt.savefig(f"simpler_pipeline/results/x_second.png", dpi=300, bbox_inches="tight")
-        plt.close()
 
     # DIGIT
     digit = torch.randint(0, 10, (B,), device=y.device)
@@ -280,7 +302,12 @@ def model(y, batch_id):
         logger.info(f"First digit: {digit.argmax(dim=1)}")
 
     # CENTER
-    centre = torch.randint(14, 86, (B, 2), device=y.device)
+    xmin, xmax = 14, 85
+    ymin, ymax = 14, 85
+    centre = torch.randint(xmin, xmax+1, (B, 2), device=y.device)
+    map_x = torch.full((B, H, W), 1, device=device)
+    # area = (ymax - ymin + 1) * (xmax - xmin + 1)
+    # map_x[:, ymin:ymax+1, xmin:xmax+1] = 1.0 / area
 
     if batch_id == 0:
         logger.info(f"First centre: {centre}")
@@ -295,31 +322,30 @@ def model(y, batch_id):
 
     for i in range(I):
 
+        if batch_id == 0:
+            dx_norm_mean = torch.zeros(T, device=y.device)
+            dx_norm_b0 = torch.zeros(T, device=y.device)  # una muestra
+            dx_norm_mean_sirt = torch.zeros(T, device=y.device)
+            dx_norm_b0_sirt = torch.zeros(T, device=y.device)  # una muestra
+
         # reconstruction
         for t in range(T):
+            x_prev = x
             Ax = A_torch(x)
             r = y - Ax
-
-            if batch_id == 0 and i % 5== 0 and t == 0:
-                plt.imshow(r[0,0].detach().cpu().numpy(), cmap="gray")
-                plt.colorbar()
-                plt.savefig(f"simpler_pipeline/results/{i}_r_second.png", dpi=300, bbox_inches="tight")
-                plt.close()
-
             AT_r = AT_torch(r)
-            x = x + alpha * AT_r
-
-            if batch_id == 0 and i % 5== 0 and t == 0:
-                plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
-                plt.colorbar()
-                plt.savefig(f"simpler_pipeline/results/{i}_x_second.png", dpi=300, bbox_inches="tight")
-                plt.close()
+            step_data = alpha * AT_r
+            if batch_id ==0:
+                logger.info(f"Gradient descent step {i}_{t}: {step_data.flatten(1).norm(dim=1)}")
+            x = x + step_data
 
             # regularization term F
+            x = x.clamp(0,1)
             x = x.detach()
 
             # we need to crop x as an MNIST digit 28x28
             crops = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
+
 
             for b in range(B):
                 cy = int(centre[b, 0].item())
@@ -331,72 +357,84 @@ def model(y, batch_id):
             crop_x = crops.detach().requires_grad_(True)
             
 
-            if batch_id == 0 and i == 5:
-                plt.imshow(crop_x[0,0].detach().cpu().numpy(), cmap="gray")
-                plt.colorbar()
-                plt.savefig("simpler_pipeline/results/crop_image_second.png", dpi=300, bbox_inches="tight")
-                plt.close()
-
             # calculate the value of mu() in this cropeed image         
             log_mu = - mu_model(crop_x, digit).view(B, 1)      # es nll                               
 
             # getting the F value and its gradient
-            F =  (sigma_data**2) * log_mu.sum()
+            F =  -(sigma_data**2) * log_mu.sum()
 
             grad_crop = torch.autograd.grad(F, crop_x, create_graph=False)[0] 
 
-            if batch_id == 0 and i % 5== 0:
+            if batch_id == 0 and i % 2 == 0 and t==0:
                 plt.imshow(grad_crop[0,0].detach().cpu().numpy(), cmap="gray")
                 plt.colorbar()
-                plt.savefig(f"simpler_pipeline/results/{i}_grad_crop_second.png", dpi=300, bbox_inches="tight")
+                plt.savefig(f"simpler_pipeline/results/{i}_grad_crop.png", dpi=300, bbox_inches="tight")
                 plt.close()
 
-            #x_scaled = x.clone()
-            #scale = grad_crop.norm() / (x_scaled.norm() + 1e-8)
-            #x_scaled = x_scaled * scale
-            grad_F = - x.clone() #x_scale
+            x_scaled = x.clone()
+            scale = grad_crop.norm() / (x_scaled.norm() + 1e-8)
+            x_scaled = x_scaled * scale
+            map_x_ = map_x.unsqueeze(1)
+            grad_F = - x_scaled #/ map_x_ #x_scale
 
-            if batch_id == 0 and i % 5== 0:
-                plt.imshow(grad_F[0,0].detach().cpu().numpy(), cmap="gray")
-                plt.colorbar()
-                plt.savefig(f"simpler_pipeline/results/{i}_grad_x_second.png", dpi=300, bbox_inches="tight")
-                plt.close()
 
             for b in range(B):
                 cy = int(centre[b, 0].item())
                 cx = int(centre[b, 1].item())
                 grad_F[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = grad_crop[b:b+1]
 
-            if batch_id == 0 and i % 5== 0:
-                plt.imshow(grad_F[0,0].detach().cpu().numpy(), cmap="gray")
-                plt.colorbar()
-                plt.savefig(f"simpler_pipeline/results/{i}_grad_F_second.png", dpi=300, bbox_inches="tight")
-                plt.close()
-
             # grad descent on total => x <- x - beta * grad_F
-            beta_i = beta * (5 ** i)
-            x = x + beta_i * grad_F
+            step_F = beta * grad_F
+            if batch_id ==0:
+                logger.info(f"Gradient descent step F {i}_{t}: {step_F.flatten(1).norm(dim=1)}")
+
+            x = x + step_F
+
+            # debugging || x^{k+1} -x^k||
+            if batch_id == 0:
+                dx = x - x_prev
+                dx_norm_b0[t] = dx[0].flatten().norm()          # norma para el primer elemento del batch
+                dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()                  # media batch
+
 
             #only SIRT
+            x_sirt_prev = x_sirt
             Ax_sirt = A_torch(x_sirt)
             r_sirt = y - Ax_sirt
             AT_r_sirt = AT_torch(r_sirt)
             x_sirt = x_sirt + alpha * AT_r_sirt
+            x_sirt = x_sirt.clamp(0,1)
 
+            # debugging || x^{k+1} -x^k||
+            if batch_id == 0:
+                dx = x_sirt - x_sirt_prev
+                dx_norm_b0_sirt[t] = dx[0].flatten().norm()          # norma por elemento del batch
+                dx_norm_mean_sirt[t] = dx.flatten(1).norm(dim=1).mean()             # media batch
 
-        if batch_id == 0 and i % 5== 0:
+        if batch_id == 0:
+            plt.figure()
+            plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
+            plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
+            plt.plot(dx_norm_mean_sirt.detach().cpu().numpy(), label="mean over batch SIRT")
+            plt.plot(dx_norm_b0_sirt.detach().cpu().numpy(), label="sample 0 SIRT")
+            plt.yscale("log")
+            plt.xlabel("t")
+            plt.ylabel("$||x_{t+1}-x_t||$")
+            plt.legend()
+            plt.savefig(f"simpler_pipeline/results/{i}_dx_norm_batch0.png", dpi=300, bbox_inches="tight")
+            plt.close()
+
+        if batch_id == 0 and i % 2 == 0:
             plt.imshow(x_sirt[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig(f"simpler_pipeline/results/{i}_sirt_image_second.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/results/{i}_sirt.png", dpi=300, bbox_inches="tight")
             plt.close()
 
             plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig(f"simpler_pipeline/results/{i}_sirt_flow_image_second.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/results/{i}_flow.png", dpi=300, bbox_inches="tight")
             plt.close()
 
-
-        
         
 
         #center 
@@ -413,24 +451,13 @@ def model(y, batch_id):
                             chunk_size=512  # prueba 256/512/1024 según memoria
                         )
 
-        # Flatten the (H,W) grid into a vector of length H*W so we can do softmax/topk per batch element
-        flat = map_x.view(B, -1)
+        flat = map_x.view(B, -1)          # [B, H*W]
+        best_idx = flat.argmax(dim=1)     # [B]
 
-        # Stabilize numerically by subtracting the per-sample maximum score (softmax invariance)
-        flat = flat - flat.max(dim=1, keepdim=True).values
-        
-        # Convert scores into a probability distribution over all centers
-        w = torch.softmax(flat, dim=1)  # shape: [B, H*W]
-
-        # Get indices of the k largest scores (equivalently, highest probabilities after softmax)
-        topk_vals, topk_idx = w.topk(k, dim=1)  # shapes: [B,k], [B,k]
-
-        # The MAP center within the top-k is simply the best of those k (the first one from topk)
-        best_idx = topk_idx[:, 0]  # shape: [B]
-
-        # Convert best_idx (flattened index) back to (y, x)
         cy = best_idx // W
         cx = best_idx %  W
+
+        centre_new = torch.stack([cy, cx], dim=1)   # [B,2]
         centre_new = torch.stack([cy, cx], dim=1)                     # [B, 2]
         centre_new[:,0] = centre_new[:,0].clamp(14, H-14)
         centre_new[:,1] = centre_new[:,1].clamp(14, W-14)
@@ -452,7 +479,7 @@ def model(y, batch_id):
         centre = centre_new
 
 
-        if batch_id == 0 and i % 5 == 0:
+        if batch_id == 0 and i % 2 == 0:
             logger.info(f"{i}th digit: {digit}")
             logger.info(f"{i}th centre: {centre}")
 
@@ -510,7 +537,7 @@ results = {
     }
 
 
-torch.save(results, "simpler_pipeline/results/results_mnist_ct_second.pt")
+torch.save(results, "simpler_pipeline/results/results_mnist_ct.pt")
 
 
 for h in list(logger.handlers):
