@@ -38,7 +38,7 @@ sigma_data = 0.5
 T_ini = 40
 T = 45
 I = 20
-alpha = 2e-1/(53.595951080322266)**2 #1/(liptchitz constant)^2
+alpha = 2e-1/(75.77664947509766)**2 #1/(liptchitz constant)^2
 beta = 5e-9
 device = "cuda"
 n_train = 20
@@ -129,7 +129,7 @@ for d in range(10):
 # Define flows
 L = 2               #number of latent variables (z_l)
 K = 24              #how complex the invertible function is
-torch.manual_seed(29072000)
+torch.manual_seed(0)
 
 input_shape = (1, 28, 28)
 n_dims = np.prod(input_shape)
@@ -162,7 +162,7 @@ for i in range(L):
 mu_model = nf.MultiscaleFlow(q0, flows, merges)
 mu_model = mu_model.to(device)
 
-checkpoint = torch.load("flow_model_1.pt", map_location=device)
+checkpoint = torch.load("glow_mnist_checkpoint1.pt", map_location=device)
 mu_model.load_state_dict(checkpoint["model_state_dict"])
 
 mu_model.eval() 
@@ -259,13 +259,13 @@ def model(y, batch_id):
 
     for t in range(T_ini):
         x_prev = x
-        Ax = A_torch(x)
-        r = y - Ax
-        AT_r = AT_torch(r)
-        step_data = alpha * AT_r
-        # if batch_id ==0:
-        #     logger.info(f"Gradient descent step -1_{t}: {step_data.flatten(1).norm(dim=1)}")
-        x = x + step_data
+    #     Ax = A_torch(x)
+    #     r = y - Ax
+    #     AT_r = AT_torch(r)
+    #     step_data = alpha * AT_r
+    #     # if batch_id ==0:
+    #     #     logger.info(f"Gradient descent step -1_{t}: {step_data.flatten(1).norm(dim=1)}")
+    #     x = x + step_data
 
         # debugging || x^{k+1} -x^k||
         if batch_id == 0:
@@ -338,13 +338,13 @@ def model(y, batch_id):
         # reconstruction
         for t in range(T):
             x_prev = x
-            Ax = A_torch(x)
-            r = y - Ax
-            AT_r = AT_torch(r)
-            step_data = alpha * AT_r
-            # if batch_id ==0:
-            #     logger.info(f"Gradient descent step {i}_{t}: {step_data.flatten(1).norm(dim=1)}")
-            x = x + step_data
+            # Ax = A_torch(x)
+            # r = y - Ax
+            # AT_r = AT_torch(r)
+            # step_data = alpha * AT_r
+            # # if batch_id ==0:
+            # #     logger.info(f"Gradient descent step {i}_{t}: {step_data.flatten(1).norm(dim=1)}")
+            # x = x + step_data
 
             # regularization term F
             x = x.clamp(0,1)
