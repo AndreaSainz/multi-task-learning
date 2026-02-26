@@ -7,9 +7,9 @@ import numpy as np
 seed = 29072000
 H = 100
 W = 100
-num_angles = 30
+num_angles = 60
 i_0 = 10**5
-sigma_data = 0.3
+sigma_data = 0.5
 
 # define CT geometry
 vg = ts.volume(shape=(1,H,W))                                 # Volume
@@ -72,3 +72,22 @@ def power_method(
 sigma = power_method(A)
 print(f"Lipschitz constant: {sigma}")
 #Lipschitz constant: 53.595951080322266
+
+
+# seed = 29072000
+# H = 28
+# W = 28
+# num_angles = 60
+# i_0 = 10**5
+# sigma_data = 0.5
+#Lipschitz constant: 40.08146667480469
+
+
+# seed = 29072000
+# H = 100
+# W = 100
+# num_angles = 60
+# i_0 = 10**5
+# sigma_data = 0.5
+#Lipschitz constant: 75.77664947509766
+
