@@ -42,7 +42,7 @@ alpha = 2e-1/(75.77664947509766)**2 #1/(liptchitz constant)^2
 beta = 5e-9
 device = "cuda"
 n_train = 20
-batch_size = 10
+batch_size = 1
 save_batch_id = 0
 k = int(0.05 * H * W)   # top 5%
 
@@ -237,7 +237,7 @@ def score_centers_with_unfold(model, img, digit_cond, *, H=100, W=100, patch=28,
 
 ###################################################################### Multi-task function #####################################################################
 
-def model(y, batch_id):
+def model(y, batch_id, x, centre, digit):
     images_SIRT = []
     images = []
     centers = []
@@ -250,7 +250,7 @@ def model(y, batch_id):
 
 
     # RECONSTRUCTION
-    x = torch.zeros(B, 1, H, W, device=y.device)
+    #x = torch.zeros(B, 1, H, W, device=y.device)
     
 
     if batch_id == 0:
@@ -259,13 +259,13 @@ def model(y, batch_id):
 
     for t in range(T_ini):
         x_prev = x
-    #     Ax = A_torch(x)
-    #     r = y - Ax
-    #     AT_r = AT_torch(r)
-    #     step_data = alpha * AT_r
-    #     # if batch_id ==0:
-    #     #     logger.info(f"Gradient descent step -1_{t}: {step_data.flatten(1).norm(dim=1)}")
-    #     x = x + step_data
+        # Ax = A_torch(x)
+        # r = y - Ax
+        # AT_r = AT_torch(r)
+        # step_data = alpha * AT_r
+        # # if batch_id ==0:
+        # #     logger.info(f"Gradient descent step -1_{t}: {step_data.flatten(1).norm(dim=1)}")
+        # x = x + step_data
 
         # debugging || x^{k+1} -x^k||
         if batch_id == 0:
@@ -281,14 +281,14 @@ def model(y, batch_id):
         plt.xlabel("t")
         plt.ylabel("$||x_{t+1}-x_t||$")
         plt.legend()
-        plt.savefig("simpler_pipeline/results/initial_dx_norm_batch0_3_14_14.png", dpi=300, bbox_inches="tight")
+        plt.savefig("simpler_pipeline/results/initial_dx_norm_batch0_3_5pixels.png", dpi=300, bbox_inches="tight")
         plt.close()
 
 
     if batch_id == 0:
         plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
         plt.colorbar()
-        plt.savefig("simpler_pipeline/results/first_sirt_image_3_14_14.png", dpi=300, bbox_inches="tight")
+        plt.savefig("simpler_pipeline/results/first_sirt_image_3_5pixels.png", dpi=300, bbox_inches="tight")
         plt.close()
 
     # x for only SIRT
@@ -296,18 +296,19 @@ def model(y, batch_id):
     x_sirt = x.clone()
 
     # DIGIT
-    digit = torch.randint(0, 10, (B,), device=y.device)
-    digit = torch.full((B,), 3, device=y.device, dtype=torch.long)
+    ## digit = torch.randint(0, 10, (B,), device=y.device)
+    ## digit = torch.full((B,), 3, device=y.device, dtype=torch.long)
     digit = torch.nn.functional.one_hot(digit, num_classes=10).float()
+    digit = digit.to(x.device)
 
     if batch_id == 0:
         logger.info(f"First digit: {digit.argmax(dim=1)}")
 
     # CENTER
-    xmin, xmax = 14, 85
-    ymin, ymax = 14, 85
-    centre = torch.randint(xmin, xmax+1, (B, 2), device=y.device)
-    centre = torch.ones((B, 2), device=y.device)*14
+    ## xmin, xmax = 14, 85
+    ## ymin, ymax = 14, 85
+    ## centre = torch.randint(xmin, xmax+1, (B, 2), device=y.device)
+    ## centre = torch.ones((B, 2), device=y.device)*14
     map_x = torch.full((B, H, W), 1, device=device)
     # area = (ymax - ymin + 1) * (xmax - xmin + 1)
     # map_x[:, ymin:ymax+1, xmin:xmax+1] = 1.0 / area
@@ -342,8 +343,8 @@ def model(y, batch_id):
             # r = y - Ax
             # AT_r = AT_torch(r)
             # step_data = alpha * AT_r
-            # # if batch_id ==0:
-            # #     logger.info(f"Gradient descent step {i}_{t}: {step_data.flatten(1).norm(dim=1)}")
+            # if batch_id ==0:
+            #     logger.info(f"Gradient descent step {i}_{t}: {step_data.flatten(1).norm(dim=1)}")
             # x = x + step_data
 
             # regularization term F
@@ -375,7 +376,7 @@ def model(y, batch_id):
             if batch_id == 0 and i % 2 == 0 and t==0:
                 plt.imshow(grad_crop[0,0].detach().cpu().numpy(), cmap="gray")
                 plt.colorbar()
-                plt.savefig(f"simpler_pipeline/results/{i}_grad_crop_3_14_14.png", dpi=300, bbox_inches="tight")
+                plt.savefig(f"simpler_pipeline/results/{i}_grad_crop_3_5pixels.png", dpi=300, bbox_inches="tight")
                 plt.close()
 
             x_scaled = x.clone()
@@ -392,8 +393,8 @@ def model(y, batch_id):
 
             # grad descent on total => x <- x + beta * grad_F
             step_F = beta_i * grad_F
-            # if batch_id ==0:
-            #     logger.info(f"Gradient descent step F {i}_{t}: {step_F.flatten(1).norm(dim=1)}")
+            if batch_id ==0:
+                logger.info(f"Gradient descent step F {i}_{t}: {step_F.flatten(1).norm(dim=1)}")
 
             x = x - step_F
 
@@ -428,18 +429,18 @@ def model(y, batch_id):
             plt.xlabel("t")
             plt.ylabel("$||x_{t+1}-x_t||$")
             plt.legend()
-            plt.savefig(f"simpler_pipeline/results/{i}_dx_norm_batch0_3_14_14.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/results/{i}_dx_norm_batch0_3_5pixels.png", dpi=300, bbox_inches="tight")
             plt.close()
 
         if batch_id == 0 and i % 2 == 0:
             plt.imshow(x_sirt[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig(f"simpler_pipeline/results/{i}_sirt_3_14_14.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/results/{i}_sirt_3_5pixels.png", dpi=300, bbox_inches="tight")
             plt.close()
 
             plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig(f"simpler_pipeline/results/{i}_flow_3_14_14.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/results/{i}_flow_3_5pixels.png", dpi=300, bbox_inches="tight")
             plt.close()
 
         
@@ -487,9 +488,9 @@ def model(y, batch_id):
         #digit = torch.softmax(map_digit, dim=1)
         #centre = centre_new
 
-        digit = torch.full((B,), 3, device=y.device, dtype=torch.long)
-        digit = torch.nn.functional.one_hot(digit, num_classes=10).float()
-        centre = torch.ones((B, 2), device=y.device)*14
+        ## digit = torch.full((B,), 3, device=y.device, dtype=torch.long)
+        ## digit = torch.nn.functional.one_hot(digit, num_classes=10).float()
+        ## centre = torch.ones((B, 2), device=y.device)*14
 
 
         if batch_id == 0 and i % 2 == 0:
@@ -523,11 +524,40 @@ for batch_id, batch in enumerate(train_dataloader):
     ground_truth_3 = batch["centre"]
     input_data = batch["noisy_sinogram"]
 
+    B = ground_truth_1.shape[0]
+
+
+   
+    x = torch.zeros(B, 1, 100, 100, device=ground_truth_1.device)
+
+    
+    for b in range(B):
+        cy = int(ground_truth_3[b, 0].item())
+        cx = int(ground_truth_3[b, 1].item())
+        crop = ground_truth_1[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+        # máscara de píxeles no cero
+        nonzero_mask = crop != 0
+
+        # índices de esos píxeles
+        indices = nonzero_mask.nonzero(as_tuple=False)
+
+        # si hay suficientes píxeles no cero
+        if indices.shape[0] >= 5:
+            # elegimos k aleatorios
+            selected = indices[torch.randperm(indices.shape[0])[:5]]
+
+            # los ponemos a 0
+            for idx in selected:
+                crop[idx[0], idx[1], idx[2], idx[3]] = 0.0
+
+        x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
+    
+ 
     if batch_id == 0 :
         logger.info(f"Original digit: {ground_truth_2}")
         logger.info(f"original centre: {ground_truth_3}")
 
-    images, images_SIRT, centers, digits = model(input_data, batch_id)
+    images, images_SIRT, centers, digits = model(input_data, batch_id, x, ground_truth_3, ground_truth_2)
     if batch_id == save_batch_id:
         gt_images.append(ground_truth_1)
         gt_digits.append(ground_truth_2)
@@ -550,7 +580,7 @@ results = {
     }
 
 
-torch.save(results, "simpler_pipeline/results/results_mnist_ct_3_14_14.pt")
+torch.save(results, "simpler_pipeline/results/results_mnist_ct_3_5pixels.pt")
 
 
 for h in list(logger.handlers):

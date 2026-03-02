@@ -12,6 +12,7 @@ from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import struct
 
 class mnist_ct(Dataset):
 
