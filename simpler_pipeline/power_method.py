@@ -9,7 +9,7 @@ H = 100
 W = 100
 num_angles = 60
 i_0 = 10**5
-sigma_data = 0.5
+sigma_data = 0.1
 
 # define CT geometry
 vg = ts.volume(shape=(1,H,W))                                 # Volume
@@ -88,6 +88,6 @@ print(f"Lipschitz constant: {sigma}")
 # W = 100
 # num_angles = 60
 # i_0 = 10**5
-# sigma_data = 0.5
+# sigma_data = 0.5 or 0.1
 #Lipschitz constant: 75.77664947509766
 

@@ -106,7 +106,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
-        logging.FileHandler(os.path.join(log_dir, "3_14_14.log")),
+        logging.FileHandler(os.path.join(log_dir, "4lineasvacias.log")),
         logging.StreamHandler()
     ]
 )
@@ -281,14 +281,14 @@ def model(y, batch_id, x, centre, digit):
         plt.xlabel("t")
         plt.ylabel("$||x_{t+1}-x_t||$")
         plt.legend()
-        plt.savefig("simpler_pipeline/results/initial_dx_norm_batch0_3_5pixels.png", dpi=300, bbox_inches="tight")
+        plt.savefig("simpler_pipeline/results/initial_dx_norm_batch0_4lineasvacias.png", dpi=300, bbox_inches="tight")
         plt.close()
 
 
     if batch_id == 0:
         plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
         plt.colorbar()
-        plt.savefig("simpler_pipeline/results/first_sirt_image_3_5pixels.png", dpi=300, bbox_inches="tight")
+        plt.savefig("simpler_pipeline/results/first_sirt_image_4lineasvacias.png", dpi=300, bbox_inches="tight")
         plt.close()
 
     # x for only SIRT
@@ -376,7 +376,7 @@ def model(y, batch_id, x, centre, digit):
             if batch_id == 0 and i % 2 == 0 and t==0:
                 plt.imshow(grad_crop[0,0].detach().cpu().numpy(), cmap="gray")
                 plt.colorbar()
-                plt.savefig(f"simpler_pipeline/results/{i}_grad_crop_3_5pixels.png", dpi=300, bbox_inches="tight")
+                plt.savefig(f"simpler_pipeline/results/{i}_grad_crop_4lineasvacias.png", dpi=300, bbox_inches="tight")
                 plt.close()
 
             x_scaled = x.clone()
@@ -429,18 +429,18 @@ def model(y, batch_id, x, centre, digit):
             plt.xlabel("t")
             plt.ylabel("$||x_{t+1}-x_t||$")
             plt.legend()
-            plt.savefig(f"simpler_pipeline/results/{i}_dx_norm_batch0_3_5pixels.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/results/{i}_dx_norm_batch0_4lineasvacias.png", dpi=300, bbox_inches="tight")
             plt.close()
 
         if batch_id == 0 and i % 2 == 0:
             plt.imshow(x_sirt[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig(f"simpler_pipeline/results/{i}_sirt_3_5pixels.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/results/{i}_sirt_4lineasvacias.png", dpi=300, bbox_inches="tight")
             plt.close()
 
             plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig(f"simpler_pipeline/results/{i}_flow_3_5pixels.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/results/{i}_flow_4lineasvacias.png", dpi=300, bbox_inches="tight")
             plt.close()
 
         
@@ -535,29 +535,37 @@ for batch_id, batch in enumerate(train_dataloader):
         cy = int(ground_truth_3[b, 0].item())
         cx = int(ground_truth_3[b, 1].item())
         crop = ground_truth_1[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-        # máscara de píxeles no cero
-        nonzero_mask = crop != 0
 
-        # índices de esos píxeles
-        indices = nonzero_mask.nonzero(as_tuple=False)
-
-        # si hay suficientes píxeles no cero
-        if indices.shape[0] >= 5:
-            # elegimos k aleatorios
-            selected = indices[torch.randperm(indices.shape[0])[:5]]
-
-            # los ponemos a 0
-            for idx in selected:
-                crop[idx[0], idx[1], idx[2], idx[3]] = 0.0
+        # columnas centrales
+        crop[:, :, :, 12:16] = 0.0
 
         x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
+
+        # # máscara de píxeles no cero
+        # nonzero_mask = crop != 0
+
+        # # índices de esos píxeles
+        # indices = nonzero_mask.nonzero(as_tuple=False)
+
+        # # si hay suficientes píxeles no cero
+        # if indices.shape[0] >= 5:
+        #     # elegimos k aleatorios
+        #     selected = indices[torch.randperm(indices.shape[0])[:5]]
+
+        #     # los ponemos a 0
+        #     for idx in selected:
+        #         crop[idx[0], idx[1], idx[2], idx[3]] = 0.0
+
+        # x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
     
  
     if batch_id == 0 :
         logger.info(f"Original digit: {ground_truth_2}")
         logger.info(f"original centre: {ground_truth_3}")
 
+    #if 1 in ground_truth_2 :
     images, images_SIRT, centers, digits = model(input_data, batch_id, x, ground_truth_3, ground_truth_2)
+
     if batch_id == save_batch_id:
         gt_images.append(ground_truth_1)
         gt_digits.append(ground_truth_2)
@@ -580,7 +588,7 @@ results = {
     }
 
 
-torch.save(results, "simpler_pipeline/results/results_mnist_ct_3_5pixels.pt")
+torch.save(results, "simpler_pipeline/results/results_mnist_ct_4lineasvacias.pt")
 
 
 for h in list(logger.handlers):
