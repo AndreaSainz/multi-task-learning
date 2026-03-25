@@ -31,24 +31,26 @@ from torch.utils.data import Subset
 seed = 29072000
 H = 100
 W = 100
-num_angles = 60
+num_angles = 60 #60
 i_0 = 10**5
-sigma_data = 0.5
+sigma_data = 0.3
 
 
 ### training parameters
-T_ini = 40
-T = 40
-I = 30
+T_ini = 80
+T = 70
+I = 10
+tol_dx = 1e-3
+patience_dx = 3
 alpha = 2e-1/(75.77664947509766)**2 #1/(liptchitz constant)^2
-# beta1 = [3, 3]
-# beta2 = [0,0] #[5e-4, 5e-3]
+beta1 = [0.001, 1e1]
+beta2 = [0.001, 1e-2] #[5e-4, 5e-3]
 device = "cuda"
 n_train = 10
 batch_size = 1
 save_batch_id = 0
 k = int(0.05 * H * W)   # top 5%
-results_dir = "simpler_pipeline/results/Experiments3"
+results_dir = "simpler_pipeline/results/ExperimentsClassDeno/Experiments4/60_angles_sigma_0.3"
 
 
 ###################################################################### Data #####################################################################
@@ -104,7 +106,7 @@ train_dataloader = DataLoader(
 ###################################################################### Logger #####################################################################
 # create logger for checkpoints
 log_dir = "logs"
-name = "recon_much_noise_deno_class"
+name = "60_angles_sigma_0.3_10_1e-2"
 os.makedirs(log_dir, exist_ok=True)
 
 logging.basicConfig(
@@ -253,13 +255,104 @@ def score_centers_with_unfold(
 
     return map_x
 
+def sirt_step(x, y, alpha):
+    Ax = A_torch(x)
+    r = y - Ax
+    AT_r = AT_torch(r)
+    step_data = alpha * AT_r
+    x_new = x + step_data
+    return x_new, step_data
+
+
+def extract_crops(x, centre):
+    B = x.shape[0]
+    crops = torch.zeros(B, 1, 28, 28, device=x.device, dtype=x.dtype)
+    for b in range(B):
+        cy = int(centre[b, 0].item())
+        cx = int(centre[b, 1].item())
+        crops[b:b+1] = x[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+    return crops
+
+
+def insert_crop_grad_in_image(x, grad_crop, centre, fill_mode="scaled_x"):
+    grad_F = torch.zeros_like(x)
+
+    if fill_mode == "scaled_x":
+        x_scaled = x.clone()
+        scale = grad_crop.norm() / (x_scaled.norm() + 1e-8)
+        grad_F = 10 * x_scaled * scale
+
+    for b in range(x.shape[0]):
+        cy = int(centre[b, 0].item())
+        cx = int(centre[b, 1].item())
+        grad_F[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = grad_crop[b:b+1]
+
+    return grad_F
+
+
+def regularization_grad(crop_x, digit, mode, i, batch_id, t):
+    grad_classi = 0.0
+    grad_deno = 0.0
+
+    if mode in ["both", "class"]:
+        logits = class_model(crop_x)
+        log_probs = torch.log_softmax(logits, dim=1)
+        classi = log_probs.gather(1, digit.unsqueeze(1)).squeeze(1)
+        grad_classi = torch.autograd.grad(classi.sum(), crop_x, create_graph=False)[0]
+
+    if mode in ["both", "deno"]:
+        deno = den_model(crop_x)
+        grad_deno = deno - crop_x
+
+    idx = 0 if i == 0 else 1
+
+    if mode == "both":
+        grad_crop = -(sigma_data**2) * (beta1[idx] * grad_classi + beta2[idx] * grad_deno)
+        logger.info(f"Gradient descent step {batch_id}_{i}_{t}| classifier : {beta1[idx] * grad_classi.flatten(1).norm(dim=1).mean().item()}, denoiser : {beta2[idx] * grad_deno.flatten(1).norm(dim=1).mean().item()}")
+    elif mode == "class":
+        grad_crop = -(sigma_data**2) * (beta1[idx] * grad_classi)
+        logger.info(f"Gradient descent step {batch_id}_{i}_{t}| classifier : {beta1[idx] * grad_classi.flatten(1).norm(dim=1).mean().item()}")
+    elif mode == "deno":
+        grad_crop = -(sigma_data**2) * (beta2[idx] * grad_deno)
+        logger.info(f"Gradient descent step {batch_id}_{i}_{t}| denoiser : {beta2[idx] * grad_deno.flatten(1).norm(dim=1).mean().item()}")
+    elif mode == "none":
+        grad_crop = torch.zeros_like(crop_x)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    return grad_crop
+
+
+def update_case(x, y, centre, digit, alpha, i, t, batch_id, mode):
+    x, step_data = sirt_step(x, y, alpha)
+
+    if mode == "none":
+        return x.clamp(0, 1), step_data
+
+    crop_x = extract_crops(x, centre).detach().requires_grad_(True)
+    grad_crop = regularization_grad(crop_x, digit, mode, i, batch_id, t)
+    if  i % 2 == 0 and t==0 and mode == "both": #batch_id == 0 and
+        plt.imshow(grad_crop[0,0].detach().cpu().numpy(), cmap="gray")
+        plt.colorbar()
+        plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_grad_crop_{name}.png"), dpi=300, bbox_inches="tight")
+        plt.close()
+    grad_F = insert_crop_grad_in_image(x, grad_crop, centre)
+    x = (x - grad_F).clamp(0, 1)
+
+    return x, step_data
+
 ###################################################################### Multi-task function #####################################################################
 
-def model(y, batch_id, centre, digit): #x
+def model(y, batch_id, x_true, centre, digit):
     images_SIRT = []
+    images_class = []
+    images_deno = []
     images = []
     centers = []
     digits = []
+    psnr_history = []
+    ssim_history = []   
+    
 
     B = y.shape[0]
 
@@ -271,36 +364,83 @@ def model(y, batch_id, centre, digit): #x
     x = torch.zeros(B, 1, H, W, device=y.device)
     
 
-    #if batch_id == 0:
-    dx_norm_mean = torch.zeros(T_ini, device=y.device) ################
-    dx_norm_b0 = torch.zeros(T_ini, device=y.device)  # una muestra
+    if batch_id == 0:
+        dx_norm_mean = torch.zeros(T_ini, device=y.device) ################
+        dx_norm_b0 = torch.zeros(T_ini, device=y.device)  # una muestra
 
     for t in range(T_ini):
         x_prev = x
-        Ax = A_torch(x)
-        r = y - Ax
-        AT_r = AT_torch(r)
-        step_data = alpha * AT_r
+        x , step_data = sirt_step(x, y, alpha)
         if batch_id ==0:
-            logger.info(f"Gradient descent step -1_{t}: {step_data.flatten(1).norm(dim=1).item()}")
-        x = x + step_data
+            logger.info(f"Gradient descent step -1_{t}: {step_data.flatten(1).norm(dim=1).mean().item()}")
 
         # debugging || x^{k+1} -x^k||
-        #if batch_id == 0:
-        dx = x - x_prev ################
-        dx_norm_b0[t]   = dx[0].flatten().norm()
-        dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()
-            
-    #if batch_id == 0:
-    plt.figure() ################
-    plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
-    plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
-    plt.yscale("log")
-    plt.xlabel("t")
-    plt.ylabel("$||x_{t+1}-x_t||$")
-    plt.legend()
-    plt.savefig(os.path.join(results_dir, f"{batch_id}_initial_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
-    plt.close()
+        if batch_id == 0:
+            dx = x - x_prev ################
+            dx_norm_b0[t]   = dx[0].flatten().norm()
+            dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()
+
+
+    # métricas tras la inicialización SIRT (equivale a I = -1, con T_ini pasos)
+    crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
+    crop_x_sirt = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
+    for b in range(B):
+        cy = int(centre[b, 0].item())
+        cx = int(centre[b, 1].item())
+        crop_x[b:b+1] = x_true[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+        crop_x_sirt[b:b+1] = x[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+        
+    psnr_x_init = compute_psnr_results(x.detach(), x_true.detach())
+    ssim_sirt_init = compute_ssim(x.detach(), x_true.detach(), data_range=1.0)
+    psnr_x_init_crop = compute_psnr_results(crop_x_sirt.detach(), crop_x.detach())
+    ssim_sirt_init_crop = compute_ssim(crop_x_sirt.detach(), crop_x.detach(), data_range=1.0)
+
+    ssim_history.append({
+        "I": -1,
+        "num_inner_steps": T_ini,
+        "ssim_x": ssim_sirt_init,
+        "ssim_x_sirt": ssim_sirt_init,
+        "ssim_x_clas": ssim_sirt_init,
+        "ssim_x_deno": ssim_sirt_init,
+        "ssim_x_crop": ssim_sirt_init_crop,
+        "ssim_x_sirt_crop": ssim_sirt_init_crop,
+        "ssim_x_clas_crop": ssim_sirt_init_crop,
+        "ssim_x_deno_crop": ssim_sirt_init_crop
+
+    })
+
+    logger.info(
+        f"[SSIM] I=-1 | steps={T_ini} | x={ssim_sirt_init:.4f}  | x_sirt={ssim_sirt_init:.4f} "
+    )
+
+    psnr_history.append({
+        "I": -1,
+        "num_inner_steps": T_ini,
+        "psnr_x": psnr_x_init,
+        "psnr_x_sirt": psnr_x_init,
+        "psnr_x_clas": psnr_x_init,
+        "psnr_x_deno": psnr_x_init,
+        "psnr_x_crop": psnr_x_init_crop,
+        "psnr_x_sirt_crop": psnr_x_init_crop,
+        "psnr_x_clas_crop": psnr_x_init_crop,
+        "psnr_x_deno_crop": psnr_x_init_crop
+    })
+
+    logger.info(
+        f"[PSNR] I=-1 | steps={T_ini} | x={psnr_x_init:.4f} dB | x_sirt={psnr_x_init:.4f} dB"
+    )
+
+
+    if batch_id == 0:
+        plt.figure() ################
+        plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
+        plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
+        plt.yscale("log")
+        plt.xlabel("t")
+        plt.ylabel("$||x_{t+1}-x_t||$")
+        plt.legend()
+        plt.savefig(os.path.join(results_dir, f"{batch_id}_initial_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
+        plt.close()
 
 
     #if batch_id == 0:
@@ -311,7 +451,10 @@ def model(y, batch_id, centre, digit): #x
 
     # x for only SIRT
     x = x.clamp(0,1)
+    x_both = x.clone()
     x_sirt = x.clone()
+    x_class = x.clone()
+    x_deno = x.clone()
 
     # DIGIT
     #digit = torch.randint(0, 10, (B,), device=y.device)
@@ -343,125 +486,125 @@ def model(y, batch_id, centre, digit): #x
 
     for i in range(I):
 
-        #if batch_id == 0:
-        dx_norm_mean = torch.zeros(T, device=y.device) ################
-        dx_norm_b0 = torch.zeros(T, device=y.device)  # una muestra
-        dx_norm_mean_sirt = torch.zeros(T, device=y.device)
-        dx_norm_b0_sirt = torch.zeros(T, device=y.device)  # una muestra
+        if batch_id == 0:
+            dx_norm_mean = torch.zeros(T, device=y.device) ################
+            dx_norm_b0 = torch.zeros(T, device=y.device)  # una muestra
+            dx_norm_mean_sirt = torch.zeros(T, device=y.device)
+            dx_norm_b0_sirt = torch.zeros(T, device=y.device)  # una muestra
 
         # reconstruction
         for t in range(T):
-            x_prev = x
-            Ax = A_torch(x)
-            r = y - Ax
-            AT_r = AT_torch(r)
-            step_data = alpha * AT_r
+            x_prev_both = x_both 
+            x_both , step_data = update_case(x_both, y, centre, digit, alpha, i, t, batch_id, "both")
             if batch_id ==0:
-                logger.info(f"Gradient descent step {i}_{t}: {step_data.flatten(1).norm(dim=1).item()}")
-            x = x + step_data
+                logger.info(f"Gradient descent step {i}_{t}: {step_data.flatten(1).norm(dim=1).mean().item()}")
 
-            # regularization term F
-            x = x.clamp(0,1)
-            x = x.detach()
-
-            # we need to crop x as an MNIST digit 28x28
-            crops = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-
-
-            for b in range(B):
-                cy = int(centre[b, 0].item())
-                cx = int(centre[b, 1].item())
-                crops[b:b+1] = x[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-
-            # normalizing Flow was trained for data in range [0,1]
-            crops = torch.clamp(crops, 0.0, 1.0)
-            crop_x = crops.detach().requires_grad_(True)
-            
-
-            # calculate the value of mu() in this cropeed image
-            logits = class_model(crop_x)   # [B,10]
-            log_probs = torch.log_softmax(logits, dim=1)         # [B,10]
-            classi = log_probs.gather(1, digit.unsqueeze(1)).squeeze(1)     # [B,1]
-            grad_classi = torch.autograd.grad(classi.sum(),crop_x,create_graph=False)[0]
-            deno = den_model(crop_x)
-            grad_deno = (deno-crop_x)
-
-            # getting the F value and its gradient
-            #F =  (sigma_data**2) * log_mu.sum()
-            if i == 0:
-                g = grad_classi.flatten(1).norm(dim=1)  # (B,)
-                beta1 = 0.01 / (g + 1e-8)
-                g = grad_deno.flatten(1).norm(dim=1)  # (B,)
-                beta2 = 0.01 / (g + 1e-8)
-                grad_crop = -(sigma_data**2) * (beta1*grad_classi + beta2*grad_deno)
-            else:
-                g = grad_classi.flatten(1).norm(dim=1)  # (B,)
-                beta1 = 0.08 / (g + 1e-8)
-                g = grad_deno.flatten(1).norm(dim=1)  # (B,)
-                beta2 = 0.08 / (g + 1e-8)
-                grad_crop = -(sigma_data**2) * (beta1*grad_classi + beta2*grad_deno)
-            #grad_crop = torch.autograd.grad(F, crop_x, create_graph=False)[0] 
-
-            if  i % 2 == 0 and t==0: #batch_id == 0 and
-                plt.imshow(grad_crop[0,0].detach().cpu().numpy(), cmap="gray")
-                plt.colorbar()
-                plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_grad_crop__{name}.png"), dpi=300, bbox_inches="tight")
-                plt.close()
-
-            x_scaled = x.clone()
-            scale = grad_crop.norm() / (x_scaled.norm() + 1e-8)
-            x_scaled = x_scaled * scale
-            grad_F = 10 * x_scaled 
-
-            
-
-
-            for b in range(B):
-                cy = int(centre[b, 0].item())
-                cx = int(centre[b, 1].item())
-                grad_F[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = grad_crop[b:b+1]
-
-            # grad descent on total => x <- x + beta * grad_F
-            step_F =  grad_F
-            # if  #batch_id ==0 and
-            logger.info(f"Gradient descent step {batch_id}_{i}_{t}| classifier : {beta1*grad_classi.flatten(1).norm(dim=1).item()}, denoiser : {beta2*grad_deno.flatten(1).norm(dim=1).item()}")
-            # else: #if batch_id ==0:
-            #     logger.info(f"Gradient descent step {batch_id}_{i}_{t}| classifier : {beta1[1]*grad_classi.flatten(1).norm(dim=1).item()}, denoiser : {beta2[1]*grad_deno.flatten(1).norm(dim=1).item()}")
-            x = x - step_F
-
+        
             # debugging || x^{k+1} -x^k||
-            #if batch_id == 0:
-            dx = x - x_prev ################
-            dx_norm_b0[t] = dx[0].flatten().norm()          # norma para el primer elemento del batch
-            dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()                  # media batch
+            if batch_id == 0:
+                dx = x_both - x_prev_both ################
+                dx_norm_b0[t] = dx[0].flatten().norm()          # norma para el primer elemento del batch
+                dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()                  # media batch
 
 
             #only SIRT
             x_sirt_prev = x_sirt
-            Ax_sirt = A_torch(x_sirt)
-            r_sirt = y - Ax_sirt
-            AT_r_sirt = AT_torch(r_sirt)
-            x_sirt = x_sirt + alpha * AT_r_sirt
-            x_sirt = x_sirt.clamp(0,1)
+            x_sirt , _ = update_case(x_sirt, y, centre, digit, alpha, i, t, batch_id, "none")
 
             # debugging || x^{k+1} -x^k||
-            #if batch_id == 0:
-            dx = x_sirt - x_sirt_prev ################
-            dx_norm_b0_sirt[t] = dx[0].flatten().norm()          # norma por elemento del batch
-            dx_norm_mean_sirt[t] = dx.flatten(1).norm(dim=1).mean()             # media batch
+            if batch_id == 0:
+                dx = x_sirt - x_sirt_prev ################
+                dx_norm_b0_sirt[t] = dx[0].flatten().norm()          # norma por elemento del batch
+                dx_norm_mean_sirt[t] = dx.flatten(1).norm(dim=1).mean()             # media batch
 
-        #if batch_id == 0:
-        plt.figure() ################
-        plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch") 
-        plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
-        plt.plot(dx_norm_mean_sirt.detach().cpu().numpy(), label="mean over batch SIRT")
-        plt.plot(dx_norm_b0_sirt.detach().cpu().numpy(), label="sample 0 SIRT")
-        plt.yscale("log")
-        plt.xlabel("t")
-        plt.ylabel("$||x_{t+1}-x_t||$")
-        plt.legend()
-        plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
-        plt.close()
+
+            #only classifier
+            x_class , _ = update_case(x_class, y, centre, digit, alpha, i, t, batch_id, "class")
+
+
+            #only denoiser
+            x_deno , _ = update_case(x_deno, y, centre, digit, alpha, i, t, batch_id, "deno")
+
+        crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
+        crop_x_both = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
+        crop_x_sirt = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
+        crop_x_class = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
+        crop_x_deno = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
+        for b in range(B):
+            cy = int(centre[b, 0].item())
+            cx = int(centre[b, 1].item())
+            crop_x[b:b+1] = x_true[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+            crop_x_both[b:b+1] = x_both[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+            crop_x_sirt[b:b+1] = x_sirt[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+            crop_x_class[b:b+1] = x_class[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+            crop_x_deno[b:b+1] = x_deno[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+
+
+        # métricas 
+        psnr_x_init = compute_psnr_results(x_both.detach(), x_true.detach())
+        psnr_sirt_init = compute_psnr_results(x_sirt.detach(), x_true.detach())
+        psnr_x_clas = compute_psnr_results(x_class.detach(), x_true.detach())
+        psnr_x_deno = compute_psnr_results(x_deno.detach(), x_true.detach())
+        ssim_x_init = compute_ssim(x_both.detach(), x_true.detach(), data_range=1.0)
+        ssim_sirt_init = compute_ssim(x_sirt.detach(), x_true.detach(), data_range=1.0)
+        ssim_x_clas = compute_ssim(x_class.detach(), x_true.detach(), data_range=1.0)
+        ssim_x_deno = compute_ssim(x_deno.detach(), x_true.detach(), data_range=1.0)
+        psnr_x_init_crop = compute_psnr_results(crop_x_both.detach(), crop_x.detach())
+        psnr_sirt_init_crop = compute_psnr_results(crop_x_sirt.detach(), crop_x.detach())
+        psnr_x_clas_crop = compute_psnr_results(crop_x_class.detach(), crop_x.detach())
+        psnr_x_deno_crop = compute_psnr_results(crop_x_deno.detach(), crop_x.detach())
+        ssim_x_init_crop = compute_ssim(crop_x_both.detach(), crop_x.detach(), data_range=1.0)
+        ssim_sirt_init_crop = compute_ssim(crop_x_sirt.detach(), crop_x.detach(), data_range=1.0)
+        ssim_x_clas_crop = compute_ssim(crop_x_class.detach(), crop_x.detach(), data_range=1.0)
+        ssim_x_deno_crop = compute_ssim(crop_x_deno.detach(), crop_x.detach(), data_range=1.0)
+
+        ssim_history.append({
+            "I": i,
+            "num_inner_steps": T,
+            "ssim_x": ssim_x_init,
+            "ssim_x_sirt": ssim_sirt_init,
+            "ssim_x_clas": ssim_x_clas,
+            "ssim_x_deno": ssim_x_deno,
+            "ssim_x_crop": ssim_x_init_crop,
+            "ssim_x_sirt_crop": ssim_sirt_init_crop,
+            "ssim_x_clas_crop": ssim_x_clas_crop,
+            "ssim_x_deno_crop": ssim_x_deno_crop
+            
+        })
+
+        logger.info(
+            f"[SSIM] I={i} | steps={T} | x={ssim_x_init:.4f}  | x_sirt={ssim_sirt_init:.4f} "
+        )
+
+        psnr_history.append({
+            "I": i,
+            "num_inner_steps": T,
+            "psnr_x": psnr_x_init,
+            "psnr_x_sirt": psnr_sirt_init,
+            "psnr_x_clas": psnr_x_clas,
+            "psnr_x_deno": psnr_x_deno,
+            "psnr_x_crop": psnr_x_init_crop,
+            "psnr_x_sirt_crop": psnr_sirt_init_crop,
+            "psnr_x_clas_crop": psnr_x_clas_crop,
+            "psnr_x_deno_crop": psnr_x_deno_crop
+        })
+
+        logger.info(
+            f"[PSNR] I={i} | steps={T} | x={psnr_x_init:.4f} dB | x_sirt={psnr_sirt_init:.4f} dB"
+        )
+
+        if batch_id == 0:
+            plt.figure() ################
+            plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch") 
+            plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
+            plt.plot(dx_norm_mean_sirt.detach().cpu().numpy(), label="mean over batch SIRT")
+            plt.plot(dx_norm_b0_sirt.detach().cpu().numpy(), label="sample 0 SIRT")
+            plt.yscale("log")
+            plt.xlabel("t")
+            plt.ylabel("$||x_{t+1}-x_t||$")
+            plt.legend()
+            plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
+            plt.close()
 
         if  i % 2 == 0: #batch_id == 0 and
             plt.imshow(x_sirt[0,0].detach().cpu().numpy(), cmap="gray")
@@ -469,7 +612,7 @@ def model(y, batch_id, centre, digit): #x
             plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_sirt__{name}.png"), dpi=300, bbox_inches="tight")
             plt.close()
 
-            plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
+            plt.imshow(x_both[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
             plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_flow_{name}.png"), dpi=300, bbox_inches="tight")
             plt.close()
@@ -523,12 +666,14 @@ def model(y, batch_id, centre, digit): #x
             logger.info(f"{i}th centre: {centre}")
 
         #save information
-        images.append(x.detach().cpu())
+        images.append(x_both.detach().cpu())
         images_SIRT.append(x_sirt.detach().cpu())
+        images_class.append(x_class.detach().cpu())
+        images_deno.append(x_deno.detach().cpu())
         centers.append(centre.detach().cpu())
         digits.append(digit.detach().cpu())
 
-    return images, images_SIRT, centers, digits
+    return images, images_SIRT, images_class, images_deno, centers, digits, psnr_history, ssim_history
 
 
 
@@ -537,10 +682,28 @@ def model(y, batch_id, centre, digit): #x
 gt_images = []
 gt_digits = []
 gt_centers = []
-model_images = []
+both_images = []
 model_digits = []
 model_centers = []
 sirt_images = []
+clas_images = []
+deno_images = []
+sirt_psnr = []
+both_psnr = []
+clas_psnr = []
+deno_psnr = []
+sirt_ssim = []
+both_ssim = []
+clas_ssim = []
+deno_ssim = []
+sirt_psnr_crop = []
+both_psnr_crop = []
+clas_psnr_crop = []
+deno_psnr_crop = []
+sirt_ssim_crop = []
+both_ssim_crop = []
+clas_ssim_crop = []
+deno_ssim_crop = []
 
 for batch_id, batch in enumerate(train_dataloader):
 
@@ -593,25 +756,133 @@ for batch_id, batch in enumerate(train_dataloader):
         logger.info(f"original centre: {ground_truth_3}")
 
     #if 1 in ground_truth_2 :
-    images, images_SIRT, centers, digits = model(input_data, batch_id, ground_truth_3, ground_truth_2) #x
+    images, images_SIRT, images_class, images_deno, centers, digits, psnr_history, ssim_history = model(input_data, batch_id, ground_truth_1, ground_truth_3, ground_truth_2)
+    
+    # coger la última imagen de cada lista
+    img = ground_truth_1[0,0].detach().cpu().numpy()
+    img_both = images[-1][0, 0].numpy()
+    img_sirt = images_SIRT[-1][0, 0].numpy()
+    img_class = images_class[-1][0, 0].numpy()
+    img_deno = images_deno[-1][0, 0].numpy()
+    # stack para calcular rango global
+    all_imgs = np.stack([img, img_sirt, img_both, img_class, img_deno])
+    vmin = all_imgs.min()
+    vmax = all_imgs.max()
 
-    if batch_id == save_batch_id:
-        gt_images.append(ground_truth_1)
-        gt_digits.append(ground_truth_2)
-        gt_centers.append(ground_truth_3)
-        model_images.append(images)
-        model_digits.append(digits)
-        model_centers.append(centers)
-        sirt_images.append(images_SIRT)
+    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
+
+    im = axes[0].imshow(img_sirt, cmap="gray", vmin=vmin, vmax=vmax)
+    axes[0].set_title("SIRT only")
+    axes[0].axis("off")
+
+    axes[1].imshow(img_both, cmap="gray", vmin=vmin, vmax=vmax)
+    axes[1].set_title("SIRT + classifier + denoiser")
+    axes[1].axis("off")
+
+    axes[2].imshow(img_class, cmap="gray", vmin=vmin, vmax=vmax)
+    axes[2].set_title("SIRT + classifier")
+    axes[2].axis("off")
+
+    axes[3].imshow(img_deno, cmap="gray", vmin=vmin, vmax=vmax)
+    axes[3].set_title("SIRT + denoiser")
+    axes[3].axis("off")
+
+    axes[4].imshow(img, cmap="gray", vmin=vmin, vmax=vmax)
+    axes[4].set_title("Ground Truth")
+    axes[4].axis("off")
+
+
+    # barra de color común
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
+    fig.colorbar(im, cax=cbar_ax)
+
+    plt.tight_layout(rect=[0, 0, 0.9, 1])
+    plt.savefig(os.path.join(results_dir, f"{batch_id}_comparison_{name}.png"), dpi=300, bbox_inches="tight")
+
+    I_vals = [d["I"] for d in psnr_history]
+    psnr_x_vals = [d["psnr_x"] for d in psnr_history]
+    psnr_x_sirt_vals = [d["psnr_x_sirt"] for d in psnr_history]
+
+    plt.figure()
+    plt.plot(I_vals, psnr_x_vals, marker="o", label="x")
+    plt.plot(I_vals, psnr_x_sirt_vals, marker="o", label="x SIRT")
+    plt.xlabel("I")
+    plt.ylabel("PSNR (dB)")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(results_dir, f"{batch_id}_psnr_curve_{name}.png"), dpi=300, bbox_inches="tight")
+    plt.close()
+
+    I_vals = [d["I"] for d in ssim_history]
+    ssim_x_vals = [d["ssim_x"] for d in ssim_history]
+    ssim_x_sirt_vals = [d["ssim_x_sirt"] for d in ssim_history]
+
+    plt.figure()
+    plt.plot(I_vals, ssim_x_vals, marker="o", label="x")
+    plt.plot(I_vals, ssim_x_sirt_vals, marker="o", label="x SIRT")
+    plt.xlabel("I")
+    plt.ylabel("SSIM")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(results_dir, f"{batch_id}_ssim_curve_{name}.png"), dpi=300, bbox_inches="tight")
+    plt.close()
+
+    
+    gt_images.append(ground_truth_1)
+    gt_digits.append(ground_truth_2)
+    gt_centers.append(ground_truth_3)
+    both_images.append(images)
+    model_digits.append(digits)
+    model_centers.append(centers)
+    sirt_images.append(images_SIRT)
+    clas_images.append(images_class)
+    deno_images.append(images_deno)
+    sirt_psnr.append([d["psnr_x_sirt"] for d in psnr_history])
+    both_psnr.append([d["psnr_x"] for d in psnr_history])
+    clas_psnr.append([d["psnr_x_clas"] for d in psnr_history])
+    deno_psnr.append([d["psnr_x_deno"] for d in psnr_history])
+    sirt_ssim.append([d["ssim_x_sirt"] for d in ssim_history])
+    both_ssim.append([d["ssim_x"] for d in ssim_history])
+    clas_ssim.append([d["ssim_x_clas"] for d in ssim_history])
+    deno_ssim.append([d["ssim_x_deno"] for d in ssim_history])
+    sirt_psnr_crop.append([d["psnr_x_sirt_crop"] for d in psnr_history])
+    both_psnr_crop.append([d["psnr_x_crop"] for d in psnr_history])
+    clas_psnr_crop.append([d["psnr_x_clas_crop"] for d in psnr_history])
+    deno_psnr_crop.append([d["psnr_x_deno_crop"] for d in psnr_history])
+    sirt_ssim_crop.append([d["ssim_x_sirt_crop"] for d in ssim_history])
+    both_ssim_crop.append([d["ssim_x_crop"] for d in ssim_history])
+    clas_ssim_crop.append([d["ssim_x_clas_crop"] for d in ssim_history])
+    deno_ssim_crop.append([d["ssim_x_deno_crop"] for d in ssim_history])
 
 results = {
+    "T_ini": T_ini,
     "T" : T,
     "I" : I,
+    "sigma_data": sigma_data,
+    "angles": angles,
     "gt_images": gt_images,
     "gt_digits": gt_digits,
     "gt_centers": gt_centers,
-    "model_images": model_images,      # [batch][iter][B,1,H,W]
+    "both_images": both_images,      # [batch][iter][B,1,H,W]
     "sirt_images": sirt_images,
+    "clas_images": clas_images,
+    "deno_images": deno_images,
+    "sirt_psnr": sirt_psnr,
+    "both_psnr": both_psnr,
+    "clas_psnr": clas_psnr,
+    "deno_psnr": deno_psnr,
+    "sirt_ssim": sirt_ssim,
+    "both_ssim": both_ssim,
+    "clas_ssim": clas_ssim,
+    "deno_ssim": deno_ssim,
+    "sirt_psnr_crop": sirt_psnr_crop,
+    "both_psnr_crop": both_psnr_crop,
+    "clas_psnr_crop": clas_psnr_crop,
+    "deno_psnr_crop": deno_psnr_crop,
+    "sirt_ssim_crop": sirt_ssim_crop,
+    "both_ssim_crop": both_ssim_crop,
+    "clas_ssim_crop": clas_ssim_crop,
+    "deno_ssim_crop": deno_ssim_crop,
     "model_digits": model_digits,
     "model_centers": model_centers,
     }

@@ -7,7 +7,7 @@ import numpy as np
 seed = 29072000
 H = 100
 W = 100
-num_angles = 60
+num_angles = 30
 i_0 = 10**5
 sigma_data = 0.1
 
@@ -91,3 +91,11 @@ print(f"Lipschitz constant: {sigma}")
 # sigma_data = 0.5 or 0.1
 #Lipschitz constant: 75.77664947509766
 
+
+# seed = 29072000
+# H = 100
+# W = 100
+# num_angles = 30
+# i_0 = 10**5
+# sigma_data = 0.5 or 0.1
+#Lipschitz constant: 53.595951080322266
