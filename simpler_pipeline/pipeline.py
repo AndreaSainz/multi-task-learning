@@ -31,17 +31,17 @@ H = 100
 W = 100
 num_angles = 60
 i_0 = 10**5
-sigma_data = 0.5
+sigma_data = 0.3
 
 
 ### training parameters
-T_ini = 40
-T = 45
+T_ini = 80
+T = 80
 I = 20
 alpha = 2e-1/(75.77664947509766)**2 #1/(liptchitz constant)^2
-beta = 5e-9
+beta = 5e-5
 device = "cuda"
-n_train = 20
+n_train = 10
 batch_size = 1
 save_batch_id = 0
 k = int(0.05 * H * W)   # top 5%
@@ -128,7 +128,7 @@ for d in range(10):
 # Import trained mu(x_cropped|digit)
 # Define flows
 L = 2               #number of latent variables (z_l)
-K = 24              #how complex the invertible function is
+K = 32              #how complex the invertible function is
 torch.manual_seed(0)
 
 input_shape = (1, 28, 28)
@@ -162,7 +162,7 @@ for i in range(L):
 mu_model = nf.MultiscaleFlow(q0, flows, merges)
 mu_model = mu_model.to(device)
 
-checkpoint = torch.load("glow_mnist_checkpoint1.pt", map_location=device)
+checkpoint = torch.load("glow_mnist_checkpoint_mixed.pt", map_location=device)
 mu_model.load_state_dict(checkpoint["model_state_dict"])
 
 mu_model.eval() 

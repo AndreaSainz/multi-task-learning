@@ -20,10 +20,10 @@ class Config:
     model_name: str = "cnn_classifier"
     task: str = "classification"     
     batch_size: int = 128
-    epochs: int = 10
+    epochs: int = 13
     lr: float = 1e-3
     weight_decay: float = 0.0
-    num_workers: int = 4
+    num_workers: int = 2
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     save_dir: str = "./checkpoints/classifier"
     noise_std_max: float = 0.4
@@ -117,6 +117,121 @@ def save_history(history, config):
     with open(os.path.join(config.save_dir, f"{config.model_name}_history.json"), "w") as f:
         json.dump(history, f, indent=4)
 
+def attenuate_full_digit( x, attenuation_range=(0.35, 0.85), foreground_threshold=0.0 ):
+    """
+    Atenúa TODO el foreground del dígito.
+    x: [B,1,H,W] en [0,1]
+    """
+    x_out = x.clone()
+    device = x.device
+    B = x.shape[0]
+
+    # un factor distinto por imagen
+    factors = torch.empty(B, 1, 1, 1, device=device).uniform_(
+        attenuation_range[0], attenuation_range[1]
+    )
+
+    fg_mask = (x > foreground_threshold).float()
+
+    # fondo igual, foreground atenuado
+    x_out = x * (1.0 - fg_mask) + x * factors * fg_mask
+    return x_out
+
+def corrupt_faint_digit(
+    x,
+    p_clean=0.5,
+    attenuation_range=(0.35, 0.85),
+    foreground_threshold=0.05
+):
+    """
+    Devuelve:
+    - imagen limpia
+    - imagen con el dígito más tenue
+    """
+    r = torch.rand(1, device=x.device).item()
+
+    if r < p_clean:
+        return x
+    else:
+        return attenuate_full_digit( x, attenuation_range=attenuation_range, foreground_threshold=foreground_threshold )
+
+def attenuate_digit_structure( x, num_patches_range=(1, 3), patch_size_range=(4, 10), attenuation_range=(0.2, 0.7), foreground_threshold=0.0 ):
+    """
+    x: [B,1,H,W] en [0,1]
+
+    Atenúa regiones del foreground del dígito sin borrar completamente
+    su estructura.
+    """
+    x_out = x.clone()
+    B, C, H, W = x.shape
+    device = x.device
+
+    for b in range(B):
+        fg = (x[b, 0] > foreground_threshold).nonzero(as_tuple=False)
+
+        if fg.numel() == 0:
+            continue
+
+        num_patches = torch.randint(
+            num_patches_range[0],
+            num_patches_range[1] + 1,
+            (1,),
+            device=device
+        ).item()
+
+        for _ in range(num_patches):
+            idx = torch.randint(0, fg.shape[0], (1,), device=device).item()
+            cy, cx = fg[idx].tolist()
+
+            patch_size = torch.randint(
+                patch_size_range[0],
+                patch_size_range[1] + 1,
+                (1,),
+                device=device
+            ).item()
+
+            half = patch_size // 2
+            y0, y1 = max(0, cy - half), min(H, cy + half + 1)
+            x0, x1 = max(0, cx - half), min(W, cx + half + 1)
+
+            factor = torch.empty(1, device=device).uniform_(
+                attenuation_range[0], attenuation_range[1]
+            ).item()
+
+            patch = x_out[b:b+1, :, y0:y1, x0:x1]
+            fg_patch = (patch > foreground_threshold).float()
+
+            # atenúa solo el trazo
+            x_out[b:b+1, :, y0:y1, x0:x1] = patch * (1 - fg_patch) + patch * factor * fg_patch
+
+    return x_out
+
+def corrupt_ct_like( x, sigma_max=0.4, p_clean=0.25, p_gaussian=0.25, p_attenuation=0.25, p_both=0.2 ):
+    """
+    Devuelve una versión corrupta de x con una mezcla de:
+    - limpio
+    - ruido gaussiano
+    - atenuación estructural
+    - atenuación estructural + ruido
+    """
+    r = torch.rand(1, device=x.device).item()
+
+    if r < p_clean:
+        return x
+
+    elif r < p_clean + p_gaussian:
+        x, _ = add_noise(x, sigma_max)
+        return x
+
+    elif r < p_clean + p_gaussian + p_attenuation:
+        x = attenuate_digit_structure(x)
+        return x
+
+    else:
+        x = attenuate_digit_structure(x)
+        x, _ = add_noise(x, sigma_max)
+        return x
+
 # ============================================================
 # DATA
 # ============================================================
@@ -168,8 +283,7 @@ def classification_step(model, batch, device, criterion, sigma_max, add_noise_fl
     y = y.to(device)
 
     if add_noise_flag:
-        x, _ = add_noise(x, sigma_max)
-
+        x = corrupt_faint_digit( x, p_clean=0.5, attenuation_range=(0.35, 0.85), foreground_threshold=0.0 )
     logits = model(x)
     loss = criterion(logits, y)
 
@@ -456,29 +570,29 @@ if __name__ == "__main__":
     from code.models.classifier import CNNClassifier
     from code.models.denoiser import ResUNetDenoiser
 
-    # #classifier
-    # model = CNNClassifier()
-
-    # config = Config(
-    #     model_name="cnn_classifier",
-    #     task="classification",
-    #     epochs=20,
-    #     save_dir="./checkpoints/classifier"
-    # )
-
-    #denoiser
-    model = ResUNetDenoiser()
+    #classifier
+    model = CNNClassifier()
 
     config = Config(
-        model_name="dncnn",
-        task="denoising",
-        epochs=20,
-        save_dir="./checkpoints/denoiser"
+        model_name="cnn_classifier_clean",
+        task="classification",
+        epochs=30,
+        save_dir="./checkpoints/classifier"
     )
+
+    # #denoiser
+    # model = ResUNetDenoiser()
+
+    # config = Config(
+    #     model_name="dncnn",
+    #     task="denoising",
+    #     epochs=20,
+    #     save_dir="./checkpoints/denoiser"
+    # )
 
     os.makedirs(config.save_dir, exist_ok=True)
 
-    with open(os.path.join(config.save_dir, "config.json"), "w") as f:
+    with open(os.path.join(config.save_dir, "config_clean.json"), "w") as f:
         json.dump(config.__dict__, f, indent=4)
 
     train(model, config)

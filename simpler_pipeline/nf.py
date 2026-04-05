@@ -30,17 +30,38 @@ from torch.utils.data import Dataset
 from PIL import Image
 
 
-# class AddGaussianNoise:
-#     def __init__(self, sigma):
-#         self.sigma = sigma
+class NoisyDataset(torch.utils.data.Dataset):
+    def __init__(self, base_dataset, sigma=0.08, apply_flow_preprocessing=True):
+        self.base_dataset = base_dataset
+        self.sigma = sigma
+        self.apply_flow_preprocessing = apply_flow_preprocessing
 
-#     def __call__(self, x):
-#         x =  x + torch.randn_like(x) * self.sigma
-#         return torch.clamp(x, 0.0, 1.0)
+    def __len__(self):
+        return len(self.base_dataset)
 
+    def __getitem__(self, idx):
+        x, y = self.base_dataset[idx]
+        x = x + torch.randn_like(x) * self.sigma
+        x = torch.clamp(x, 0.0, 1.0)
 
-#     def __repr__(self):
-#         return f"AddGaussianNoise(sigma={self.sigma})"
+        if self.apply_flow_preprocessing:
+            x = nf.utils.Scale(255. / 256.)(x)
+            x = nf.utils.Jitter(1 / 256.)(x)
+
+        return x, y
+
+class CleanFlowDataset(torch.utils.data.Dataset):
+    def __init__(self, base_dataset):
+        self.base_dataset = base_dataset
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx):
+        x, y = self.base_dataset[idx]
+        x = nf.utils.Scale(255. / 256.)(x)
+        x = nf.utils.Jitter(1 / 256.)(x)
+        return x, y
 
 # Set up model
 
@@ -125,59 +146,100 @@ class CTMNIST(Dataset):
         return img, label
 
 
+
+
+### To much noise
+# train_data = CTMNIST(
+#     images_path="data/MNIST_CT/train-images-ct-idx3-ubyte",
+#     labels_path="data/MNIST_CT/train-labels-ct-idx1-ubyte",
+#     transform=transform,
+# )
+
+# test_data = CTMNIST(
+#     images_path="data/MNIST_CT/test-images-ct-idx3-ubyte",
+#     labels_path="data/MNIST_CT/test-labels-ct-idx1-ubyte",
+#     transform=transform,
+# )
+
+# train_loader = torch.utils.data.DataLoader(
+#     train_data, batch_size=batch_size, shuffle=True, drop_last=True
+# )
+
+# test_loader = torch.utils.data.DataLoader(
+#     test_data, batch_size=batch_size
+# )
+
+
+
+
+
+# Prepare training data
 batch_size = 128
 
-transform = tv.transforms.Compose([
+# base_train = tv.datasets.MNIST(
+#     'data/',
+#     train=True,
+#     download=True,
+#     transform=tv.transforms.ToTensor()
+# )
+
+# clean_train = CleanFlowDataset(base_train)
+# noisy_train = NoisyDataset(base_train, sigma=0.08)
+
+# train_data = torch.utils.data.ConcatDataset([clean_train, noisy_train])
+
+# train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True,
+#                                            drop_last=True)
+
+
+
+# test_clean = tv.datasets.MNIST(
+#     'data/',
+#     train=False,
+#     download=True,
+#     transform=tv.transforms.ToTensor()
+# )
+
+# test_clean = CleanFlowDataset(test_clean)
+# test_loader = torch.utils.data.DataLoader(test_clean, batch_size=batch_size)
+
+
+# train_iter = iter(train_loader)
+
+
+transform_flow = tv.transforms.Compose([
     tv.transforms.ToTensor(),
     nf.utils.Scale(255. / 256.),
     nf.utils.Jitter(1 / 256.)
 ])
 
-train_data = CTMNIST(
-    images_path="data/MNIST_CT/train-images-ct-idx3-ubyte",
-    labels_path="data/MNIST_CT/train-labels-ct-idx1-ubyte",
-    transform=transform,
-)
-
-test_data = CTMNIST(
-    images_path="data/MNIST_CT/test-images-ct-idx3-ubyte",
-    labels_path="data/MNIST_CT/test-labels-ct-idx1-ubyte",
-    transform=transform,
+train_data = tv.datasets.MNIST(
+    'data/',
+    train=True,
+    download=True,
+    transform=transform_flow
 )
 
 train_loader = torch.utils.data.DataLoader(
-    train_data, batch_size=batch_size, shuffle=True, drop_last=True
+    train_data,
+    batch_size=batch_size,
+    shuffle=True,
+    drop_last=True
+)
+
+test_data = tv.datasets.MNIST(
+    'data/',
+    train=False,
+    download=True,
+    transform=transform_flow
 )
 
 test_loader = torch.utils.data.DataLoader(
-    test_data, batch_size=batch_size
+    test_data,
+    batch_size=batch_size
 )
 
-
-
-
-
-
-# # Prepare training data
-# batch_size = 128
-
-# transform = tv.transforms.Compose([
-#     tv.transforms.ToTensor(),
-#     # AddGaussianNoise(sigma=0.2),    
-#     nf.utils.Scale(255. / 256.),
-#     # nf.utils.Jitter(1 / 256.)
-# ])
-# train_data = tv.datasets.MNIST('datasets/', train=True,
-#                                  download=True, transform=transform)
-# train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True,
-#                                            drop_last=True)
-
-# test_data = tv.datasets.MNIST('datasets/', train=False,
-#                                 download=True, transform=transform) 
-# test_loader = torch.utils.data.DataLoader(test_data, batch_size=batch_size)
-
 train_iter = iter(train_loader)
-
 
 # def batch_to_crop_ct(batch):
 #     input_data = batch["noisy_sinogram"].to(device)
@@ -306,14 +368,14 @@ for i in tqdm(range(max_iter)):
 plt.figure(figsize=(10, 10))
 plt.plot(loss_hist, label='loss')
 plt.legend()
-plt.savefig("loss_curve_ct.png", dpi=300)
+plt.savefig("loss_curve_clean.png", dpi=300)
 
 
 
 torch.save({
     "model_state_dict": model.state_dict(),
     "optimizer_state_dict": optimizer.state_dict(),
-}, "glow_mnist_checkpoint_ct.pt")
+}, "glow_mnist_checkpoint_clean.pt")
 
 
 
@@ -326,7 +388,7 @@ with torch.no_grad():
     x_ = torch.clamp(x, 0, 1)
     plt.figure(figsize=(10, 10))
     plt.imshow(np.transpose(tv.utils.make_grid(x_, nrow=num_classes).cpu().numpy(), (1, 2, 0)))
-    plt.savefig("sample_nf_ct.png", dpi=300)
+    plt.savefig("sample_nf_clean.png", dpi=300)
 
 
 # test_data = Subset(data, val_idx)
@@ -372,3 +434,15 @@ LU, pivots, info = torch.linalg.lu_factor_ex(A, compute_pivots) (Triggered inter
 100%|████████████████████████████████████████████████████████████████████████████████████████████████████| 50000/50000 [2:21:10<00:00,  5.90it/s]
 Bits per dim:  1.2682499378204346
 """
+
+
+#Sabado 28 de Marzo
+# LU, pivots = torch.linalg.lu_factor(A, compute_pivots)
+# and
+# LU, pivots, info = torch.lu(A, compute_pivots, get_infos=True)
+# should be replaced with
+# LU, pivots, info = torch.linalg.lu_factor_ex(A, compute_pivots) (Triggered internally at ../aten/src/ATen/native/BatchLinearAlgebra.cpp:1990.)
+#   LU, pivots, infos = torch._lu_with_info(
+# 100%|████████████████████████████████████████████████████████████████| 50000/50000 [3:08:21<00:00,  4.42it/s]
+# Bits per dim:  1.2614823728561402
+

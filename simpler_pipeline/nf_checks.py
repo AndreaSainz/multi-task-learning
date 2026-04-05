@@ -25,7 +25,7 @@ device = "cuda"
 # Import trained mu(x_cropped|digit)
 # Define flows
 L = 2               #number of latent variables (z_l)
-K = 24 #24              #how complex the invertible function is
+K = 32 #24              #how complex the invertible function is
 torch.manual_seed(0)
 
 input_shape = (1, 28, 28)
@@ -59,7 +59,7 @@ for i in range(L):
 mu_model = nf.MultiscaleFlow(q0, flows, merges)
 mu_model = mu_model.to(device)
 
-checkpoint = torch.load("glow_mnist_checkpoint1.pt", map_location=device)
+checkpoint = torch.load("glow_mnist_checkpoint_clean.pt", map_location=device)
 mu_model.load_state_dict(checkpoint["model_state_dict"])
 
 mu_model.eval() 
@@ -204,7 +204,7 @@ results = {
     "labels": labels_list,
     }
 
-path_saving = "simpler_pipeline/results/nf_checks_results1.pt"
+path_saving = "simpler_pipeline/results/nf_checks_results_clean.pt"
 torch.save(results, path_saving)
 
 
@@ -241,7 +241,7 @@ def compute_confusion(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int =
     return confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
 
 
-def plot_accuracy_bar(acc_gt, acc_ct, top2_gt, top2_ct, savepath="simpler_pipeline/results/accuracy_bar1.png"):
+def plot_accuracy_bar(acc_gt, acc_ct, top2_gt, top2_ct, savepath="simpler_pipeline/results/accuracy_bar_clean.png"):
     labels = ["GT", "CT"]
     x = np.arange(len(labels))
     width = 0.35
@@ -259,7 +259,7 @@ def plot_accuracy_bar(acc_gt, acc_ct, top2_gt, top2_ct, savepath="simpler_pipeli
     plt.show()
 
 
-def plot_confusion_heatmap(cm, title, savepath="simpler_pipeline/results/confusion_heatmap1.png"):
+def plot_confusion_heatmap(cm, title, savepath="simpler_pipeline/results/confusion_heatmap_clean.png"):
     plt.figure()
     plt.imshow(cm, interpolation="nearest")
     plt.title(title)
@@ -273,7 +273,7 @@ def plot_confusion_heatmap(cm, title, savepath="simpler_pipeline/results/confusi
     plt.show()
 
 
-def plot_entropy_hist(ent_gt, ent_ct, bins=40, savepath= "simpler_pipeline/results/entropy_hist1.png"):
+def plot_entropy_hist(ent_gt, ent_ct, bins=40, savepath= "simpler_pipeline/results/entropy_hist_clean.png"):
     plt.figure()
     plt.hist(ent_gt.numpy(), bins=bins, alpha=0.6, label="GT")
     plt.hist(ent_ct.numpy(), bins=bins, alpha=0.6, label="CT")
@@ -320,8 +320,8 @@ plot_accuracy_bar(acc_gt, acc_ct, top2_gt, top2_ct)
 cm_gt = compute_confusion(labels.numpy(), pred_gt.numpy(), num_classes=10)
 cm_ct = compute_confusion(labels.numpy(), pred_ct.numpy(), num_classes=10)
 
-plot_confusion_heatmap(cm_gt, "Confusion matrix (GT crops)", savepath="simpler_pipeline/results/confusion_heatmap_gt1.png")
-plot_confusion_heatmap(cm_ct, "Confusion matrix (CT crops)", savepath="simpler_pipeline/results/confusion_heatmap_ct1.png")
+plot_confusion_heatmap(cm_gt, "Confusion matrix (GT crops)", savepath="simpler_pipeline/results/confusion_heatmap_gt_clean.png")
+plot_confusion_heatmap(cm_ct, "Confusion matrix (CT crops)", savepath="simpler_pipeline/results/confusion_heatmap_ct_clean.png")
 
 # 3) Entropy histograms
 ent_gt = entropy_from_probs(probs_gt)  # [N]

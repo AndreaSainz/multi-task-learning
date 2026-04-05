@@ -368,7 +368,7 @@ def model(y, batch_id, x_true, centre, digit):
             dx_norm_b0[r]   = dx[0].flatten().norm()
             dx_norm_mean[r] = dx.flatten(1).norm(dim=1).mean()
 
-    # métricas tras la inicialización SIRT (equivale a I = -1, con T_ini pasos)
+    # metrics after the initialization with SIRT (equi to I = -1, with T_ini steps)
     crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
     crop_x_sirt = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
     for b in range(B):
@@ -496,7 +496,7 @@ def model(y, batch_id, x_true, centre, digit):
                 dx_norm_mean_sirt[r] = dx.flatten(1).norm(dim=1).mean()             # media batch
 
                 
-        # métricas tras la inicialización SIRT (equivale a I = -1, con T_ini pasos)
+        # metrics after the minimization
         crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
         crop_x_sirt = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
         crop_x_score = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
