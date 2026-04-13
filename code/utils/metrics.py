@@ -30,15 +30,13 @@ def compute_psnr(mse, max_val=1.0):
     """
     
     # if mse is a tensor, extract the value
-    if isinstance(mse, torch.Tensor):
-        mse = mse.item()
-    
-    # if MSE is zero, return infinite PSNR (perfect match)
-    if mse == 0:
-        return float('inf')
-    
-    # calculate PSNR using the standard formula
-    psnr = 10 * math.log10(max_val ** 2 / mse)
+    if not isinstance(mse, torch.Tensor):
+        mse = torch.tensor(mse, dtype=torch.float32)
+
+    psnr = torch.empty_like(mse)
+    nonzero = mse > 0
+    psnr[nonzero] = 10 * torch.log10((max_val ** 2) / mse[nonzero])
+    psnr[~nonzero] = float("inf")
 
     return psnr
 
@@ -66,16 +64,14 @@ def compute_psnr_results(pred, target, max_val=1.0):
         >>> psnr = compute_psnr_results(pred, target)
     """
 
-    # initilize the L2 loss function
-    mse_fn = MSELoss()
 
     #calculate the L2 value for the ground truth and prediction
-    mse = mse_fn(pred, target).item()
+    mse = ((pred - target) ** 2).flatten(1).mean(dim=1)   # [B]
 
-    if mse == 0:
-        return float('inf')
-
-    psnr = 10 * math.log10(max_val ** 2 / mse)
+    psnr = torch.empty_like(mse)
+    nonzero = mse > 0
+    psnr[nonzero] = 10 * torch.log10((max_val ** 2) / mse[nonzero])
+    psnr[~nonzero] = float("inf")
 
     return psnr
 
@@ -105,16 +101,32 @@ def compute_ssim(reconstructed, ground_truth, data_range):
     
     # Ensure input tensors are 4D: [B, C, H, W]
     if reconstructed.ndim == 3:
-        reconstructed = reconstructed.unsqueeze(1)  # Add channel dimension
+        reconstructed = reconstructed.unsqueeze(1)
     if ground_truth.ndim == 3:
         ground_truth = ground_truth.unsqueeze(1)
-        
-    # both inputs must be shape [B, C, H, W]
-    return ssim(reconstructed, ground_truth, data_range).item()
+
+    B = reconstructed.shape[0]
+    vals = []
+
+    for b in range(B):
+        val = ssim(
+            reconstructed[b:b+1],
+            ground_truth[b:b+1],
+            data_range=data_range
+        )
+        if isinstance(val, torch.Tensor):
+            val = val.detach().cpu().float()
+            if val.numel() == 1:
+                val = val.squeeze(0)
+        else:
+            val = torch.tensor(val, dtype=torch.float32)
+        vals.append(val)
+
+    return torch.stack(vals)   # [B]
 
 
 def compute_mse(pred, target):
-    return ((pred - target) ** 2).mean().item()
+    return ((pred - target) ** 2).flatten(1).mean(dim=1)
 
 def update_confusion_matrix(cm, logits, target, num_classes=10):
     """
