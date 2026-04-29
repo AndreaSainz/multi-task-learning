@@ -265,8 +265,7 @@ def score_centers_with_unfold(
 
         # Weighted score using digit distribution
         score_cls = (w * probs).sum(dim=1)                  # [chunk]
-        alpha = 0.2
-        score = score_cls + alpha * active_ratio
+        score = 0.8 * score_cls + 0.2 * active_ratio
         scores_flat[start:end] = score.float()
 
 
