@@ -425,12 +425,9 @@ def expected_task_gradient(
                 sigma_data=sigma_data,
             )  # [1,1,28,28]
 
-             # scale(c) for that centre
-            patch_norm = grad_patch.norm()
-            scale = patch_norm / xb_norm
 
             # complete gradient for this center
-            grad_c = alpha_img * xb #* scale   # [1,1,H,W]
+            grad_c = alpha_img * xb    # [1,1,H,W]
 
             # subtitution for grad_crop in the crop 
             grad_c = grad_c.clone()

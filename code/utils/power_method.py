@@ -5,9 +5,9 @@ import numpy as np
 ####################################### Lipschitz constant of A ###################################################
 ### data
 seed = 29072000
-H = 100
-W = 100
-num_angles = 30
+H = 28
+W = 28
+num_angles = 60
 i_0 = 10**5
 sigma_data = 0.1
 
@@ -99,3 +99,21 @@ print(f"Lipschitz constant: {sigma}")
 # i_0 = 10**5
 # sigma_data = 0.5 or 0.1
 #Lipschitz constant: 53.595951080322266
+
+
+# seed = 29072000
+# H = 28
+# W = 28
+# num_angles = 30
+# i_0 = 10**5
+# sigma_data = 0.1
+#Lipschitz constant: 28.349531173706055
+
+
+# seed = 29072000
+# H = 28
+# W = 28
+# num_angles = 60
+# i_0 = 10**5
+# sigma_data = 0.1
+#Lipschitz constant: 40.08146667480469
