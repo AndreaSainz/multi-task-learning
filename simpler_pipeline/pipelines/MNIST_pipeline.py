@@ -53,21 +53,21 @@ xmin, xmax = rad, W - rad - 1
 T_ini = 15
 T_max = 15
 T_min = 1
-decay_iters = 30
-I = 30
+decay_iters = 70
+I = 70
 tol_dx = 1e-3
 patience_dx = 3
 alpha = 0.1 #100/(28.349531173706055)**2  #1/(liptchitz constant)^2    40.08146667480469
-beta1 = 2
-beta2 = 2e-1
-lambda_par = 0.4
+beta1 =  0.02 ##2
+beta2 = 7e-3
+lambda_par = 0
 accelerator = Accelerator()
 device = accelerator.device
 n_train = 10
 batch_size = 1
 save_batch_id = 0
 eps = 1e-12
-results_dir = "simpler_pipeline/results/Just_Classification/30_angles_sigma_0.3"
+results_dir = "simpler_pipeline/Results/Just_Classification/true_digit"
 
 # define CT geometry
 vg = ts.volume(shape=(1,H,W))                                 # Volume
@@ -119,7 +119,7 @@ train_dataloader = DataLoader(
 ###################################################################### Logger #####################################################################
 # create logger for checkpoints
 log_dir = "logs"
-name = "30_angles_sigma_0.3_just_classification"
+name = "30_angles_sigma_0.3_true_digit_just_classification"
 
 os.makedirs(log_dir, exist_ok=True)
 handlers = [logging.StreamHandler()]
@@ -396,18 +396,18 @@ def model(y, D, M, batch_id, x_true, digit_true):
         for t in range(T):
 
             # BOTH
-            x_both , step_data = update_case(x_both, y, D, M, digit, alpha, i, t, batch_id, "both")
+            x_both , step_data = update_case(x_both, y, D, M, digit_true, alpha, i, t, batch_id, "both") ########
 
 
             #only SIRT
-            x_sirt , _ = update_case(x_sirt, y, D, M, digit, alpha, i, t, batch_id, "none")
+            x_sirt , _ = update_case(x_sirt, y, D, M, digit_true, alpha, i, t, batch_id, "none")########
 
             #only classifier
-            x_class , _ = update_case(x_class, y, D, M, digit, alpha, i, t, batch_id, "class")
+            x_class , _ = update_case(x_class, y, D, M, digit_true, alpha, i, t, batch_id, "class")########
 
 
             #only denoiser
-            x_deno , _ = update_case(x_deno, y, D, M, digit, alpha, i, t, batch_id, "deno")
+            x_deno , _ = update_case(x_deno, y, D, M, digit_true, alpha, i, t, batch_id, "deno")########
 
         
         # métricas 
@@ -695,38 +695,38 @@ for batch_id, batch in enumerate(train_dataloader):
 
 
         
-    
-            gt_images.append(ground_truth_1[b].detach().cpu())
-            gt_digits.append(ground_truth_2[b].detach().cpu())
+    for b in range(B):    
+        gt_images.append(ground_truth_1[b].detach().cpu())
+        gt_digits.append(ground_truth_2[b].detach().cpu())
 
-            both_images.append(images[-1][b].detach().cpu())
-            sirt_images.append(images_SIRT[-1][b].detach().cpu())
-            clas_images.append(images_class[-1][b].detach().cpu())
-            deno_images.append(images_deno[-1][b].detach().cpu())
+        both_images.append(images[-1][b].detach().cpu())
+        sirt_images.append(images_SIRT[-1][b].detach().cpu())
+        clas_images.append(images_class[-1][b].detach().cpu())
+        deno_images.append(images_deno[-1][b].detach().cpu())
 
-            both_digits.append(digits[-1][b].detach().cpu())
-            sirt_digits.append(digits_sirt[-1][b].detach().cpu())
-
-
-            both_digit_prob_true.append([d["digit_prob_true"][b].item() for d in digit_acc_history])
-            sirt_digit_prob_true.append([d["digit_prob_true_sirt"][b].item() for d in digit_acc_history])
-
-            both_digit_nll.append([d["digit_nll"][b].item() for d in digit_acc_history])
-            sirt_digit_nll.append([d["digit_nll_sirt"][b].item() for d in digit_acc_history])
-
-            both_digit_entropy.append([d["digit_entropy"][b].item() for d in digit_acc_history])
-            sirt_digit_entropy.append([d["digit_entropy_sirt"][b].item() for d in digit_acc_history])
+        both_digits.append(digits[-1][b].detach().cpu())
+        sirt_digits.append(digits_sirt[-1][b].detach().cpu())
 
 
-            both_psnr.append([d["psnr_x"][b].item() for d in psnr_history])
-            sirt_psnr.append([d["psnr_x_sirt"][b].item() for d in psnr_history])
-            clas_psnr.append([d["psnr_x_clas"][b].item() for d in psnr_history])
-            deno_psnr.append([d["psnr_x_deno"][b].item() for d in psnr_history])
+        both_digit_prob_true.append([d["digit_prob_true"][b].item() for d in digit_acc_history])
+        sirt_digit_prob_true.append([d["digit_prob_true_sirt"][b].item() for d in digit_acc_history])
 
-            both_ssim.append([d["ssim_x"][b].item() for d in ssim_history])
-            sirt_ssim.append([d["ssim_x_sirt"][b].item() for d in ssim_history])
-            clas_ssim.append([d["ssim_x_clas"][b].item() for d in ssim_history])
-            deno_ssim.append([d["ssim_x_deno"][b].item() for d in ssim_history])
+        both_digit_nll.append([d["digit_nll"][b].item() for d in digit_acc_history])
+        sirt_digit_nll.append([d["digit_nll_sirt"][b].item() for d in digit_acc_history])
+
+        both_digit_entropy.append([d["digit_entropy"][b].item() for d in digit_acc_history])
+        sirt_digit_entropy.append([d["digit_entropy_sirt"][b].item() for d in digit_acc_history])
+
+
+        both_psnr.append([d["psnr_x"][b].item() for d in psnr_history])
+        sirt_psnr.append([d["psnr_x_sirt"][b].item() for d in psnr_history])
+        clas_psnr.append([d["psnr_x_clas"][b].item() for d in psnr_history])
+        deno_psnr.append([d["psnr_x_deno"][b].item() for d in psnr_history])
+
+        both_ssim.append([d["ssim_x"][b].item() for d in ssim_history])
+        sirt_ssim.append([d["ssim_x_sirt"][b].item() for d in ssim_history])
+        clas_ssim.append([d["ssim_x_clas"][b].item() for d in ssim_history])
+        deno_ssim.append([d["ssim_x_deno"][b].item() for d in ssim_history])
 
 results = {
     "T_ini": T_ini,

@@ -1,0 +1,774 @@
+import torch
+import torch.nn.functional as F
+from accelerate import Accelerator
+from tomosipo.torch_support import to_autograd
+import numpy as np
+import tomosipo as ts
+from torch.utils.data import DataLoader, random_split
+from code.dataloader.data_loader import MnistDataset
+from code.models.classifier import CNNClassifier
+from code.models.denoiser import ResUNetDenoiser
+from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import math
+import logging
+import os
+from torch.utils.data import Subset
+import normflows as nf
+from collections import Counter
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Subset
+
+
+seed = 29072000
+import random
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
+###################################################################### Parameters #####################################################################
+
+### data
+seed = 29072000
+H = 28
+W = 28
+num_angles = 30 #60
+i_0 = 10**5
+sigma_data = 0.3
+patch = 28
+rad = patch // 2
+ymin, ymax = rad, H - rad - 1
+xmin, xmax = rad, W - rad - 1
+
+
+### training parameters
+T_ini = 20
+T_max = 15
+T_min = 1
+decay_iters = 20
+I = 20
+tol_dx = 1e-3
+patience_dx = 3
+alpha = 0.1 #100/(28.349531173706055)**2  #1/(liptchitz constant)^2    40.08146667480469
+beta1 =  0.02 ##2
+beta2 = 5e-2
+lambda_par = 0
+accelerator = Accelerator()
+device = accelerator.device
+n_test = 10
+batch_size = 1
+save_batch_id = 0
+eps = 1e-12
+results_dir = "simpler_pipeline/Results/Just_Classification/fine_tunning_30_0.3"
+
+# define CT geometry
+vg = ts.volume(shape=(1,H,W))                                 # Volume
+angles = np.linspace(0, np.pi, num_angles, endpoint=True)     # Angles
+pg = ts.parallel(angles=angles, shape=(1, H))                 # Parallel beam structure
+A = ts.operator(vg,pg)
+
+
+A_torch  = to_autograd(A,   is_2d=True, num_extra_dims=2)
+AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
+
+# Import data
+data = MnistDataset(training = False,
+                testing= True, 
+                A = A, 
+                dimension = (H,W), 
+                num_angles = num_angles, 
+                sigma = sigma_data,
+                i_0 = i_0,
+                cut = False,
+                seed = seed,
+                max_len = None,
+                device = device)
+
+
+# Split from fine tunning
+index = np.load("/home/as3628/multi-task-learning/checkpoints/classifier/splits.npz")
+test_idx = index["test_idx"]
+
+test_idx = list(range(n_test))
+
+test_data = Subset(data, test_idx)
+
+
+# create dataloader
+test_dataloader = DataLoader(
+    test_data,
+    batch_size=batch_size,
+    shuffle=False)
+
+
+###################################################################### Logger #####################################################################
+# create logger for checkpoints
+log_dir = "logs"
+name = "30_angles_sigma_0.3_fine_tunning_30_0.3_true_digits"
+
+os.makedirs(log_dir, exist_ok=True)
+handlers = [logging.StreamHandler()]
+if accelerator.is_main_process:
+    handlers.insert(0, logging.FileHandler(os.path.join(log_dir, f"{name}.log")))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=handlers
+)
+
+logger = logging.getLogger(__name__)
+
+
+
+#Check if the dataset is balanced
+labels_bal = torch.tensor([data[i]["label"] for i in range(len(data))])
+counts = torch.bincount(labels_bal, minlength=10)
+
+if accelerator.is_main_process:
+    logger.info("Balanced dataset label counts:")
+    for d in range(10):
+        logger.info(f"Digit {d}: {counts[d].item()}")
+
+###################################################################### Trained Classifier and Denoiser Models #####################################################################
+
+class_model = CNNClassifier()
+
+checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/classifier/classifier_best_finetunned.pt", map_location="cpu")
+class_model.load_state_dict(checkpoint["model"])
+
+class_model.eval() 
+for p in class_model.parameters():
+   p.requires_grad_(False)
+
+den_model = ResUNetDenoiser()
+
+checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/denoiser/dncnn_best.pt", map_location="cpu")
+den_model.load_state_dict(checkpoint)
+
+den_model.eval() 
+for p in den_model.parameters():
+   p.requires_grad_(False)
+
+
+class_model, den_model, test_dataloader = accelerator.prepare(class_model, den_model, test_dataloader)
+
+
+###################################################################### utils functions #####################################################################
+
+def sirt_step(x, y, D, M, alpha):
+    Ax = A_torch(x)
+    r = (y - Ax) * M
+    AT_r = AT_torch(r) 
+    update = AT_r * D
+    step_data = alpha * update
+    x_new = x + step_data
+    return x_new, step_data
+
+def patch_scores_for_digits(
+    img,
+    digit_probs,
+    class_model,
+    den_model,
+    mode="both",
+    digit_threshold=0,
+    beta_class=1.0,
+    beta_deno=1.0,
+    sigma_data=1.0,
+):
+    """
+    img: [B,1,H,W]
+    digit_probs: [B,10]
+    devuelve:
+        grad_patch: [B,1,H,W]
+    """
+    img_req = img.clone().detach().requires_grad_(True)
+    grad_patch = torch.zeros_like(img_req)
+
+    if mode in ["both", "class"]:
+        logits = class_model(img_req)
+        probs = torch.softmax(class_model(img_req), dim=1)
+        weights = digit_probs.clone()
+        entropy = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=1).mean()
+
+        objective_clf = (weights * torch.log(probs.clamp_min(1e-12))).sum() + lambda_par * entropy
+
+        grad_clf = torch.autograd.grad(objective_clf, img_req)[0]
+
+        grad_patch = grad_patch + beta_class * grad_clf
+
+    if mode in ["both", "deno"]:
+        grad_prior = (den_model(img_req) - img_req).detach()
+        grad_patch = grad_patch + beta_deno * grad_prior
+
+    grad_patch = (sigma_data ** 2) * grad_patch
+    grad_patch = grad_patch.detach()
+
+    return grad_patch
+
+
+def expected_task_gradient(
+    x,
+    i ,
+    digit_probs,
+    class_model,
+    den_model,
+    mode="both",
+    ymin=14, ymax=85, xmin=14, xmax=85,
+    digit_threshold=0,
+    beta_class=1.0,
+    beta_deno=1.0,
+    sigma_data=1.0  
+):
+    """
+    x: [B,1,H,W]
+    digit_probs: [B,10]
+    devuelve grad_full: [B,1,H,W]
+    """
+    B, _, _, _ = x.shape
+    grad_full = torch.zeros_like(x)
+    for b in range(B):
+        xb = x[b:b+1]                       
+        dp = digit_probs[b:b+1]
+
+        grad_patch = patch_scores_for_digits(
+            img=xb,
+            digit_probs=dp,
+            class_model=class_model,
+            den_model=den_model,
+            mode=mode,
+            digit_threshold=digit_threshold,
+            beta_class=beta_class,
+            beta_deno=beta_deno,
+            sigma_data=sigma_data,
+        )  # [1,1,28,28]
+        grad_full[b:b+1] = grad_patch
+
+    del  dp, grad_patch
+    return grad_full
+
+
+def update_case(x, y, D, M,  digit, alpha, i, t, batch_id, mode):
+    x, step_data = sirt_step(x, y, D, M, alpha)
+
+    if mode == "none":
+        return x.clamp(0, 1), step_data
+
+    grad_task = expected_task_gradient(
+        x=x,
+        i=i,
+        digit_probs=digit,
+        class_model=class_model,
+        den_model=den_model,
+        mode=mode,
+        ymin=ymin, ymax=ymax, xmin=xmin, xmax=xmax,
+        digit_threshold=0,
+        beta_class=beta1,
+        beta_deno=beta2,
+        sigma_data=sigma_data,
+    )
+    
+    x = (x + grad_task).clamp(0, 1).detach()
+    return x, step_data
+
+###################################################################### Multi-task function #####################################################################
+
+def model(y, D, M, batch_id, x_true, digit_true):
+    images_SIRT = []
+    images_class = []
+    images_deno = []
+    images = []
+    digits = []
+    digits_sirt_all = []
+    psnr_history = []
+    ssim_history = []   
+    digit_acc_history = []
+
+
+    B = y.shape[0]
+
+
+    ##### Initilizing tasks
+
+
+    # RECONSTRUCTION
+    x = torch.zeros(B, 1, H, W, device=y.device)
+
+    for t in range(T_ini):
+        x_prev = x
+        x , step_data = sirt_step(x, y, D, M, alpha)
+        if accelerator.is_main_process and t == 0 and batch_id == 0:
+            fig, ax = plt.subplots()
+            im = ax.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
+            fig.colorbar(im, ax=ax)
+            fig.savefig(
+                os.path.join(results_dir, f"initial_sample_sirt_{name}.png"),
+                dpi=300, bbox_inches="tight"
+            )
+            plt.close(fig)
+
+    # x for only SIRT
+    x = x.clamp(0,1)
+    x_both = x.clone()
+    x_sirt = x.clone()
+    x_class = x.clone()
+    x_deno = x.clone()
+
+    # metrics after the initialization with SIRT (equi to I = -1, with T_ini steps)
+    psnr_x_init = compute_psnr_results(x.detach(), x_true.detach())
+    ssim_sirt_init = compute_ssim(x.detach(), x_true.detach(), data_range=1.0)
+
+    ssim_history.append({
+        "I": -1,
+        "num_inner_steps": T_ini,
+        "ssim_x": ssim_sirt_init.detach().cpu(),
+        "ssim_x_sirt": ssim_sirt_init.detach().cpu(),
+        "ssim_x_clas": ssim_sirt_init.detach().cpu(),
+        "ssim_x_deno": ssim_sirt_init.detach().cpu()
+    })
+
+    psnr_history.append({
+        "I": -1,
+        "num_inner_steps": T_ini,
+        "psnr_x": psnr_x_init.detach().cpu(),
+        "psnr_x_sirt": psnr_x_init.detach().cpu(),
+        "psnr_x_clas": psnr_x_init.detach().cpu(),
+        "psnr_x_deno": psnr_x_init.detach().cpu()
+    })
+
+    if accelerator.is_main_process:
+        logger.info(
+            f"[PSNR] I=-1 | steps={T_ini} | x={psnr_x_init.mean().item():.4f} dB"
+        )
+        logger.info(
+            f"[SSIM] I=-1 | steps={T_ini} | x={ssim_sirt_init.mean().item():.4f}"
+        )
+
+    # DIGIT
+    logits = class_model(x)
+    digit = torch.softmax(logits, dim=1)
+    digit_sirt = digit.clone()
+
+    digit_prob_true = digit.gather(1, digit_true.unsqueeze(1)).squeeze(1)
+    digit_nll = -torch.log(digit_prob_true.clamp_min(eps))
+    digit_entropy = -(digit * torch.log(digit.clamp_min(eps))).sum(dim=1)
+
+    digit_acc_history.append({
+        "I": -1,
+        "digit_nll": digit_nll.detach().cpu(),
+        "digit_prob_true": digit_prob_true.detach().cpu(),
+        "digit_entropy": digit_entropy.detach().cpu(),
+        "digit_nll_sirt": digit_nll.detach().cpu(),
+        "digit_prob_true_sirt": digit_prob_true.detach().cpu(),
+        "digit_entropy_sirt": digit_entropy.detach().cpu()
+        })
+
+    images.append(x.detach().cpu())
+    images_SIRT.append(x.detach().cpu())
+    digits.append(digit.detach().cpu())
+    digits_sirt_all.append(digit_sirt.detach().cpu())
+
+
+
+    ###### model loop
+    for i in range(I):
+        if i < decay_iters:
+            T = int(T_max - (T_max - T_min) * (i / (decay_iters - 1)))
+        else:
+            T = T_min
+
+
+        # reconstruction
+        for t in range(T):
+
+            # BOTH
+            x_both , step_data = update_case(x_both, y, D, M, digit_true, alpha, i, t, batch_id, "both") ########
+
+
+            #only SIRT
+            x_sirt , _ = update_case(x_sirt, y, D, M, digit_true, alpha, i, t, batch_id, "none")########
+
+            #only classifier
+            x_class , _ = update_case(x_class, y, D, M, digit_true, alpha, i, t, batch_id, "class")########
+
+
+            #only denoiser
+            x_deno , _ = update_case(x_deno, y, D, M, digit_true, alpha, i, t, batch_id, "deno")########
+
+        
+        # métricas 
+        psnr_x_init = compute_psnr_results(x_both.detach(), x_true.detach())
+        psnr_sirt_init = compute_psnr_results(x_sirt.detach(), x_true.detach())
+        psnr_x_clas = compute_psnr_results(x_class.detach(), x_true.detach())
+        psnr_x_deno = compute_psnr_results(x_deno.detach(), x_true.detach())
+        ssim_x_init = compute_ssim(x_both.detach(), x_true.detach(), data_range=1.0)
+        ssim_sirt_init = compute_ssim(x_sirt.detach(), x_true.detach(), data_range=1.0)
+        ssim_x_clas = compute_ssim(x_class.detach(), x_true.detach(), data_range=1.0)
+        ssim_x_deno = compute_ssim(x_deno.detach(), x_true.detach(), data_range=1.0)
+
+        ssim_history.append({
+            "I": i,
+            "num_inner_steps": T,
+            "ssim_x": ssim_x_init.detach().cpu(),
+            "ssim_x_sirt": ssim_sirt_init.detach().cpu(),
+            "ssim_x_clas": ssim_x_clas.detach().cpu(),
+            "ssim_x_deno": ssim_x_deno.detach().cpu()
+        })
+
+        psnr_history.append({
+            "I": i,
+            "num_inner_steps": T,
+            "psnr_x": psnr_x_init.detach().cpu(),
+            "psnr_x_sirt": psnr_sirt_init.detach().cpu(),
+            "psnr_x_clas": psnr_x_clas.detach().cpu(),
+            "psnr_x_deno": psnr_x_deno.detach().cpu()
+        })
+
+        if  accelerator.is_main_process:
+            logger.info(
+                f"[PSNR] I={i} | steps={T} | x={psnr_x_init.mean().item():.4f} dB | x_sirt={psnr_sirt_init.mean().item():.4f} dB"
+            )
+            logger.info(
+                f"[SSIM] I={i} | steps={T} | x={ssim_x_init.mean().item():.4f} | x_sirt={ssim_sirt_init.mean().item():.4f}"
+            )
+
+        if accelerator.is_main_process and i % 5 == 0: 
+            for b in range(B):
+
+                # --- SIRT ---
+                fig, ax = plt.subplots()
+                im = ax.imshow(x_sirt[b,0].detach().cpu().numpy(), cmap="gray")
+                fig.colorbar(im, ax=ax)
+                fig.savefig(
+                    os.path.join(results_dir, f"{batch_id}_{i}_sample{b}_sirt_{name}.png"),
+                    dpi=300, bbox_inches="tight"
+                )
+                plt.close(fig)
+
+                # --- BOTH ---
+                fig, ax = plt.subplots()
+                im = ax.imshow(x_both[b,0].detach().cpu().numpy(), cmap="gray")
+                fig.colorbar(im, ax=ax)
+                fig.savefig(
+                    os.path.join(results_dir, f"{batch_id}_{i}_sample{b}_flow_{name}.png"),
+                    dpi=300, bbox_inches="tight"
+                )
+                plt.close(fig)
+
+        # digits 
+
+        #BOTH
+        logits_both = class_model(x_both)
+        digit = torch.softmax(logits_both, dim=1)
+
+
+        digit_prob_true = digit.gather(1, digit_true.unsqueeze(1)).squeeze(1)
+        digit_nll = -torch.log(digit_prob_true.clamp_min(eps))
+        digit_entropy = -(digit * torch.log(digit.clamp_min(eps))).sum(dim=1)
+
+        #SIRT
+        logits_sirt = class_model(x_sirt)
+        digit_sirt = torch.softmax(logits_sirt, dim=1)
+
+        digit_prob_true_sirt = digit_sirt.gather(1, digit_true.unsqueeze(1)).squeeze(1)
+        digit_nll_sirt = -torch.log(digit_prob_true_sirt.clamp_min(eps))
+        digit_entropy_sirt = -(digit_sirt * torch.log(digit_sirt.clamp_min(eps))).sum(dim=1)
+
+
+        digit_acc_history.append({
+            "I": i,
+            "digit_nll": digit_nll.detach().cpu(),
+            "digit_prob_true": digit_prob_true.detach().cpu(),
+            "digit_entropy": digit_entropy.detach().cpu(),
+            "digit_nll_sirt": digit_nll_sirt.detach().cpu(),
+            "digit_prob_true_sirt": digit_prob_true_sirt.detach().cpu(),
+            "digit_entropy_sirt": digit_entropy_sirt.detach().cpu()
+            })
+
+        if accelerator.is_main_process and i % 5 == 0 and batch_id == 0:
+            logger.info(f"{i}th digit: {digit}")
+
+
+        #save information
+        images.append(x_both.detach().cpu())
+        images_SIRT.append(x_sirt.detach().cpu())
+        images_class.append(x_class.detach().cpu())
+        images_deno.append(x_deno.detach().cpu())
+        digits.append(digit.detach().cpu())
+        digits_sirt_all.append(digit_sirt.detach().cpu())
+
+        del logits_both, logits_sirt
+        torch.cuda.empty_cache()
+
+    return images, images_SIRT, images_class, images_deno, digits,digits_sirt_all, psnr_history, ssim_history, digit_acc_history
+
+
+        
+
+###################################################################### training part #####################################################################
+
+gt_images = []
+gt_digits = []
+both_digits = []
+sirt_digits = []
+both_digit_prob_true = []
+sirt_digit_prob_true = []
+both_digit_nll = []
+sirt_digit_nll = []
+both_digit_entropy = []
+sirt_digit_entropy = []
+both_images = []
+sirt_images = []
+clas_images = []
+deno_images = []
+sirt_psnr = []
+both_psnr = []
+clas_psnr = []
+deno_psnr = []
+sirt_ssim = []
+both_ssim = []
+clas_ssim = []
+deno_ssim = []
+
+for batch_id, batch in enumerate(test_dataloader):
+
+    ground_truth_1 = batch["ground_truth_image"].to(device)
+    ground_truth_2 = batch["label"].to(device)
+    input_data = batch["noisy_sinogram"].to(device)
+
+    B = ground_truth_1.shape[0]
+    eps = 1e-8
+
+    row_sums = A_torch(torch.ones_like(ground_truth_1))  # → measurements
+    col_sums = AT_torch(torch.ones_like(input_data))     # → image
+
+    M = 1.0 / torch.clamp(row_sums, min=eps)  # measurements
+    D = 1.0 / torch.clamp(col_sums, min=eps)  # image
+
+    
+    if accelerator.is_main_process:
+        logger.info(f"Original digit: {ground_truth_2}")
+
+    
+    images, images_SIRT, images_class, images_deno, digits, digits_sirt, psnr_history, ssim_history, digit_acc_history= model(input_data, D, M, batch_id, ground_truth_1, ground_truth_2)
+    
+    if accelerator.is_main_process: 
+        for b in range(B):
+
+            # take last image from the list
+            img = ground_truth_1[b,0].detach().cpu().numpy()
+            img_both = images[-1][b, 0].detach().cpu().numpy()
+            img_sirt = images_SIRT[-1][b, 0].detach().cpu().numpy()
+            img_class = images_class[-1][b, 0].detach().cpu().numpy()
+            img_deno = images_deno[-1][b, 0].detach().cpu().numpy()
+
+            all_imgs = np.stack([img, img_sirt, img_both, img_class, img_deno])
+            vmin = all_imgs.min()
+            vmax = all_imgs.max()
+
+            fig, axes = plt.subplots(1, 5, figsize=(20, 4))
+
+            im = axes[0].imshow(img_sirt, cmap="gray", vmin=vmin, vmax=vmax)
+            axes[0].set_title("SIRT only")
+            axes[0].axis("off")
+
+            axes[1].imshow(img_both, cmap="gray", vmin=vmin, vmax=vmax)
+            axes[1].set_title("SIRT + classifier + denoiser")
+            axes[1].axis("off")
+
+            axes[2].imshow(img_class, cmap="gray", vmin=vmin, vmax=vmax)
+            axes[2].set_title("SIRT + classifier")
+            axes[2].axis("off")
+
+            axes[3].imshow(img_deno, cmap="gray", vmin=vmin, vmax=vmax)
+            axes[3].set_title("SIRT + denoiser")
+            axes[3].axis("off")
+
+            axes[4].imshow(img, cmap="gray", vmin=vmin, vmax=vmax)
+            axes[4].set_title("Ground Truth")
+            axes[4].axis("off")
+
+
+            # common color bar 
+            cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
+            fig.colorbar(im, cax=cbar_ax)
+
+            fig.subplots_adjust(right=0.9)
+            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_comparison_{name}.png"), dpi=300, bbox_inches="tight")
+            plt.close(fig)
+
+            I_vals = [d["I"] for d in psnr_history]
+            psnr_x_vals = [d["psnr_x"][b].mean().item() for d in psnr_history]
+            psnr_x_sirt_vals = [d["psnr_x_sirt"][b].mean().item() for d in psnr_history]
+            psnr_x_clas_vals = [d["psnr_x_clas"][b].mean().item() for d in psnr_history]
+            psnr_x_deno_vals = [d["psnr_x_deno"][b].mean().item() for d in psnr_history]
+
+            plt.figure()
+            plt.plot(I_vals, psnr_x_sirt_vals, marker="o", label="Mean SIRT")
+            plt.plot(I_vals, psnr_x_vals, marker="o", label="Mean SIRT + classifier + denoiser")
+            plt.plot(I_vals, psnr_x_clas_vals, marker="o", label="Mean SIRT + classifier")
+            plt.plot(I_vals, psnr_x_deno_vals, marker="o", label="Mean SIRT + denoiser")
+            plt.xlabel("I")
+            plt.ylabel("PSNR (dB)")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_psnr_curve_{name}.png"), dpi=300, bbox_inches="tight")
+            plt.close()
+
+
+
+            
+            ssim_x_vals = [d["ssim_x"][b].mean().item() for d in ssim_history]
+            ssim_x_sirt_vals = [d["ssim_x_sirt"][b].mean().item() for d in ssim_history]
+            ssim_x_clas_vals = [d["ssim_x_clas"][b].mean().item() for d in ssim_history]
+            ssim_x_deno_vals = [d["ssim_x_deno"][b].mean().item() for d in ssim_history]
+
+            plt.figure()
+            plt.plot(I_vals, ssim_x_sirt_vals, marker="o", label="Mean SIRT")
+            plt.plot(I_vals, ssim_x_vals, marker="o", label="Mean SIRT + classifier + denoiser")
+            plt.plot(I_vals, ssim_x_clas_vals, marker="o", label="Mean SIRT + classifier")
+            plt.plot(I_vals, ssim_x_deno_vals, marker="o", label="Mean SIRT + denoiser")
+            plt.xlabel("I")
+            plt.ylabel("SSIM")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_ssim_curve_{name}.png"), dpi=300, bbox_inches="tight")
+            plt.close()
+
+    
+
+
+        
+            digit_prob_vals = [d["digit_prob_true"][b].mean().item() for d in digit_acc_history]
+            digit_prob_vals_sirt = [d["digit_prob_true_sirt"][b].mean().item() for d in digit_acc_history]
+
+            plt.figure()
+            plt.plot(I_vals, digit_prob_vals, marker="o", label="Mean Digit prob (model)")
+            plt.plot(I_vals, digit_prob_vals_sirt, marker="o", label="Mean Digit prob (SIRT)")
+            plt.xlabel("I")
+            plt.ylabel("Probability")
+            plt.ylim(0.0, 1.0)
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_digit_prob_curve_{name}.png"), dpi=300, bbox_inches="tight")
+            plt.close()
+
+            digit_nll_vals = [d["digit_nll"][b].mean().item() for d in digit_acc_history]
+            digit_nll_vals_sirt = [d["digit_nll_sirt"][b].mean().item() for d in digit_acc_history]
+
+            plt.figure()
+            plt.plot(I_vals, digit_nll_vals, marker="o", label="Mean Digit NLL (model)")
+            plt.plot(I_vals, digit_nll_vals_sirt, marker="o", label="Mean Digit NLL (SIRT)")
+            plt.xlabel("I")
+            plt.ylabel("-log p(true)")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_digit_nll_curve_{name}.png"), dpi=300, bbox_inches="tight")
+            plt.close()
+
+            digit_margin_vals = [d["digit_entropy"][b].mean().item() for d in digit_acc_history]
+            digit_margin_vals_sirt = [d["digit_entropy_sirt"][b].mean().item() for d in digit_acc_history]
+
+            plt.figure()
+            plt.plot(I_vals, digit_margin_vals, marker="o", label="Mean Digit entropy (model)")
+            plt.plot(I_vals, digit_margin_vals_sirt, marker="o", label="Mean Digit entropy (SIRT)")
+            plt.xlabel("I")
+            plt.ylabel("Entropy")
+            plt.legend()
+            plt.grid(True)
+            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_digit_entropy_curve_{name}.png"), dpi=300, bbox_inches="tight")
+            plt.close()
+
+
+        
+    for b in range(B):    
+        gt_images.append(ground_truth_1[b].detach().cpu())
+        gt_digits.append(ground_truth_2[b].detach().cpu())
+
+        both_images.append(images[-1][b].detach().cpu())
+        sirt_images.append(images_SIRT[-1][b].detach().cpu())
+        clas_images.append(images_class[-1][b].detach().cpu())
+        deno_images.append(images_deno[-1][b].detach().cpu())
+
+        both_digits.append(digits[-1][b].detach().cpu())
+        sirt_digits.append(digits_sirt[-1][b].detach().cpu())
+
+
+        both_digit_prob_true.append([d["digit_prob_true"][b].item() for d in digit_acc_history])
+        sirt_digit_prob_true.append([d["digit_prob_true_sirt"][b].item() for d in digit_acc_history])
+
+        both_digit_nll.append([d["digit_nll"][b].item() for d in digit_acc_history])
+        sirt_digit_nll.append([d["digit_nll_sirt"][b].item() for d in digit_acc_history])
+
+        both_digit_entropy.append([d["digit_entropy"][b].item() for d in digit_acc_history])
+        sirt_digit_entropy.append([d["digit_entropy_sirt"][b].item() for d in digit_acc_history])
+
+
+        both_psnr.append([d["psnr_x"][b].item() for d in psnr_history])
+        sirt_psnr.append([d["psnr_x_sirt"][b].item() for d in psnr_history])
+        clas_psnr.append([d["psnr_x_clas"][b].item() for d in psnr_history])
+        deno_psnr.append([d["psnr_x_deno"][b].item() for d in psnr_history])
+
+        both_ssim.append([d["ssim_x"][b].item() for d in ssim_history])
+        sirt_ssim.append([d["ssim_x_sirt"][b].item() for d in ssim_history])
+        clas_ssim.append([d["ssim_x_clas"][b].item() for d in ssim_history])
+        deno_ssim.append([d["ssim_x_deno"][b].item() for d in ssim_history])
+
+results = {
+    "T_ini": T_ini,
+    "T" : [d["num_inner_steps"] for d in psnr_history],
+    "I" : I,
+    "sigma_data": sigma_data,
+    "angles": angles,
+    "gt_images": gt_images,
+    "gt_digits": gt_digits,
+    "both_images": both_images,      # [batch][iter][B,1,H,W]
+    "sirt_images": sirt_images,
+    "clas_images": clas_images,
+    "deno_images": deno_images,
+    "sirt_psnr": sirt_psnr,
+    "both_psnr": both_psnr,
+    "clas_psnr": clas_psnr,
+    "deno_psnr": deno_psnr,
+    "sirt_ssim": sirt_ssim,
+    "both_ssim": both_ssim,
+    "clas_ssim": clas_ssim,
+    "deno_ssim": deno_ssim,
+    "both_digits": both_digits,
+    "sirt_digits": sirt_digits,
+    "both_digit_prob_true": both_digit_prob_true,
+    "sirt_digit_prob_true": sirt_digit_prob_true,
+    "both_digit_nll": both_digit_nll,
+    "sirt_digit_nll": sirt_digit_nll,
+    "both_digit_entropy": both_digit_entropy,
+    "sirt_digit_entropy": sirt_digit_entropy
+    }
+
+
+rank = accelerator.process_index
+torch.save( results, os.path.join(results_dir, f"results_mnist_ct_{name}_rank{rank}.pt" ))
+
+accelerator.wait_for_everyone()
+
+if accelerator.is_main_process:
+    for h in list(logger.handlers):
+        try:
+            h.flush()
+            h.close()
+        finally:
+            logger.removeHandler(h)
+
+    logging.shutdown()
+    
+accelerator.wait_for_everyone()
+
+if torch.distributed.is_available() and torch.distributed.is_initialized():
+    torch.distributed.destroy_process_group()
