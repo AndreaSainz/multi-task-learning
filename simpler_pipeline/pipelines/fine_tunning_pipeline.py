@@ -9,6 +9,7 @@ from code.dataloader.data_loader import MnistDataset
 from code.models.classifier import CNNClassifier
 from code.models.denoiser import ResUNetDenoiser
 from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
+from code.utils.markov_process import build_transition_matrix, markov_chain_uniform_noise
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -60,20 +61,22 @@ T_min = 1
 decay_iters = 10
 I = 10
 alpha = 0.1 
-beta1 =  2 
-beta2 = 9e-2
+beta1 =  0.3
+beta2 = 2e-2
 lambda_par = 0
 accelerator = Accelerator()
 device = accelerator.device
-n_train = 10000
-n_val = 1000
+n_train = 500
+n_val = 128
 batch_size = 128
 eps = 1e-12
 lr = 1e-4
 weight_decay = 1e-4
+rho = 0.090
+C = 0.5
 
 
-results_dir = "simpler_pipeline/Results/Just_Classification/pruebas"
+results_dir = "simpler_pipeline/Results/Just_Classification/fine_tunning_JAdler"
 classifier_dir = "/home/as3628/multi-task-learning/checkpoints/classifier"
 
 
@@ -117,17 +120,20 @@ train_dataloader = DataLoader(
     shuffle=True,
     generator=g_split)
 
+val_subset = Subset(val_data, range(n_val))
+
 val_dataloader = DataLoader(
-    val_data,
+    val_subset,
     batch_size=batch_size,
-    shuffle=False)
+    shuffle=False
+)
 
 
 
 # LOGGER
 # create logger for checkpoints
 log_dir = "logs"
-name = "30_angles_sigma_0.3_true_digit_just_classification"
+name = "30_angles_sigma_0.3_ft"
 
 os.makedirs(log_dir, exist_ok=True)
 handlers = [logging.StreamHandler()]
@@ -164,7 +170,7 @@ class_model.train()
 for p in class_model.parameters():
     p.requires_grad_(True)
 
-loss_fn = nn.CrossEntropyLoss()
+loss_fn = nn.CrossEntropyLoss() 
 optimizer = torch.optim.AdamW(class_model.parameters(), lr=lr, weight_decay= weight_decay)
 
 den_model = ResUNetDenoiser()
@@ -238,6 +244,11 @@ def patch_scores_for_digits( img, digit_probs, class_model, den_model, beta_clas
 
 
     grad_prior = (den_model(img_req) - img_req).detach()
+
+    # print("probabilidades", probs.max(dim=1).values)
+    # print("grad clf", grad_clf.abs().mean().item())
+    # print("grad prior", grad_prior.abs().mean().item())
+
     grad_patch = grad_patch + beta_deno * grad_prior
 
     grad_patch = (sigma_data ** 2) * grad_patch
@@ -334,7 +345,7 @@ def evaluate(model, dataloader, M_base, D_base):
 
 
 #  MULTI-TASK FUNCTION
-def model(y, D, M, batch_id, x_true, digit_true):
+def model(y, D, M, batch_id, x_true, digit_true, vector_of_labels):
     images_SIRT = []
     images_class = []
     images_deno = []
@@ -396,7 +407,7 @@ def model(y, D, M, batch_id, x_true, digit_true):
         "psnr_x_sirt": psnr_x_init.detach().cpu()
     })
 
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and batch_id== 0:
         logger.info(
             f"[PSNR] I=-1 | steps={T_ini} | x={psnr_x_init.mean().item():.4f} dB"
         )
@@ -412,7 +423,11 @@ def model(y, D, M, batch_id, x_true, digit_true):
     optimizer.zero_grad()
     logits = class_model(x)
 
-    loss = loss_fn(logits, digit_true)
+    # log_probs = F.log_softmax(logits, dim=1)
+    # loss_soft = -(vector_of_labels[I] * log_probs).sum(dim=1).mean()
+    loss = (1-C) * loss_fn(logits, vector_of_labels[I].to(device)) + C * F.mse_loss(A_torch(x), y)
+    # print(f"manual :{loss_soft} ||| automatica: {loss} |||| Diferencia: {loss_soft-loss}")
+
     loss.backward()
     optimizer.step()
 
@@ -471,12 +486,12 @@ def model(y, D, M, batch_id, x_true, digit_true):
         for t in range(T):
 
             # BOTH
-            x_both , step_data = update_case(x_both, y, D, M, digit_true_one_hot, alpha, i, batch_id, BOTH= True) 
+            x_both , step_data = update_case(x_both, y, D, M, vector_of_labels[I-i], alpha, i, batch_id, BOTH= True) 
             x_both = x_both.clamp(0,1)
 
 
             #only SIRT
-            x_sirt , _ = update_case(x_sirt, y, D, M, digit_true_one_hot, alpha, i, batch_id) 
+            x_sirt , _ = update_case(x_sirt, y, D, M, vector_of_labels[I-i], alpha, i, batch_id) 
             x_sirt = x_sirt.clamp(0,1)
         
         # métricas 
@@ -501,7 +516,7 @@ def model(y, D, M, batch_id, x_true, digit_true):
             "psnr_x_sirt": psnr_sirt_init.detach().cpu()
         })
 
-        if  accelerator.is_main_process:
+        if  accelerator.is_main_process and batch_id== 0:
             logger.info(
                 f"[PSNR] I={i} | steps={T} | x={psnr_x_init.mean().item():.4f} dB | x_sirt={psnr_sirt_init.mean().item():.4f} dB"
             )
@@ -542,7 +557,7 @@ def model(y, D, M, batch_id, x_true, digit_true):
         optimizer.zero_grad()
         logits_both = class_model(x_both)
 
-        loss = loss_fn(logits_both, digit_true)
+        loss = (1-C) * loss_fn(logits_both, vector_of_labels[I-i].to(device)) + C * F.mse_loss(A_torch(x_both), y)
         loss.backward()
         optimizer.step()
 
@@ -640,6 +655,11 @@ col_sums = AT_torch(ones_sino)
 M_base = 1.0 / torch.clamp(row_sums, min=1e-8)
 D_base = 1.0 / torch.clamp(col_sums, min=1e-8)
 
+# build transitioning matrix
+P = build_transition_matrix(rho = rho, num_classes=10).to(device) # 0.090 hace que en 10 pasos haya aprox 40% en la clase principal
+# print(f" P: {P}")
+# print(f" suma P: {P.sum(dim=1)}")
+
 for batch_id, batch in enumerate(train_dataloader):
 
     ground_truth_1 = batch["ground_truth_image"].to(device)
@@ -652,36 +672,46 @@ for batch_id, batch in enumerate(train_dataloader):
 
     
     
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and batch_id== 0:
         logger.info(f"Original digit: {ground_truth_2}")
 
+    # adding noise to the labels for each iteration
+    labels_one_hot = F.one_hot(ground_truth_2, num_classes=10).float().to(device)
+    vector_of_labels = markov_chain_uniform_noise(labels_one_hot, P, I+1)
+    # print(f"sahpe: {vector_of_labels.shape}")
+    # print(f" primera label: {vector_of_labels[0][0]}")
+    # print(f" ultima label: {vector_of_labels[-1][0]}")
+    # print(f" suma de cada label: {vector_of_labels.sum(dim=-1)}")
+
+    images, images_SIRT, digits, digits_sirt, psnr_history, ssim_history, digit_acc_history, iter_metrics= model(input_data, D, M, batch_id, ground_truth_1, ground_truth_2, vector_of_labels)
+
     
-    images, images_SIRT, digits, digits_sirt, psnr_history, ssim_history, digit_acc_history, iter_metrics= model(input_data, D, M, batch_id, ground_truth_1, ground_truth_2)
-    
+
     if accelerator.is_main_process:
+        unwrapped_model = accelerator.unwrap_model(class_model)
+        torch.save({
+                "model": unwrapped_model.state_dict(),
+                "optimizer": optimizer.state_dict()
+                }, os.path.join(classifier_dir, "classifier_last_finetunned_noisy_labels.pt"))
+
         if batch_id % 10 == 0:  
         
             val_acc = evaluate(class_model, val_dataloader, M_base, D_base)
-
-            if accelerator.is_main_process:
-                logger.info(f"Validation accuracy: {val_acc:.4f}")
-
+            
+            logger.info(f"Validation accuracy: {val_acc:.4f}")
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                unwrapped_model = accelerator.unwrap_model(class_model)
 
-                if accelerator.is_main_process:
-
-                    torch.save({
-                        "model": unwrapped_model.state_dict(),
-                        "optimizer": optimizer.state_dict()
-                    }, os.path.join(classifier_dir, "classifier_best_finetunned.pt"))
+                torch.save({
+                    "model": unwrapped_model.state_dict(),
+                    "optimizer": optimizer.state_dict()
+                }, os.path.join(classifier_dir, "classifier_best_finetunned_noisy_labels.pt"))
             
             val_acc_history.append(val_acc)
             steps_history.append(batch_id)
 
-        if batch_id == 0:
-            for b in range(B):
+        if batch_id== 0:
+            for b in range(20):
                 # take last image from the list
                 img = ground_truth_1[b,0].detach().cpu().numpy()
                 img_both = images[-1][b, 0].detach().cpu().numpy()
@@ -798,7 +828,7 @@ for batch_id, batch in enumerate(train_dataloader):
                 plt.figure()
                 plt.plot(I_vals, class_acc, label="Classificator accuracy")
                 plt.xlabel("I")
-                plt.ylabel("loss")
+                plt.ylabel("Accuracy")
                 plt.legend()
                 plt.grid(True)
                 plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_classificator_acc_{name}.png"), dpi=300, bbox_inches="tight")

@@ -66,7 +66,6 @@ print("Finish: data")
 # plt.close(fig)
 
 # TRAINING
-
 model = SVC(kernel="rbf", C=1.0, gamma="scale")
 
 print("Starting: training")
