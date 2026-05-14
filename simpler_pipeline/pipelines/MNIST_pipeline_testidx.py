@@ -58,7 +58,7 @@ I = 20
 tol_dx = 1e-3
 patience_dx = 3
 alpha = 0.1 #100/(28.349531173706055)**2  #1/(liptchitz constant)^2    40.08146667480469
-beta1 =  0.02 ##2
+beta1 =  0.002 ##2
 beta2 = 5e-2
 lambda_par = 0
 accelerator = Accelerator()
@@ -67,7 +67,7 @@ n_test = 10
 batch_size = 1
 save_batch_id = 0
 eps = 1e-12
-results_dir = "simpler_pipeline/Results/Just_Classification/fine_tunning_30_0.3"
+results_dir = "simpler_pipeline/Results/Just_Classification/fine_tunning_JAdler_test"
 
 # define CT geometry
 vg = ts.volume(shape=(1,H,W))                                 # Volume
@@ -94,12 +94,13 @@ data = MnistDataset(training = False,
 
 
 # Split from fine tunning
-index = np.load("/home/as3628/multi-task-learning/checkpoints/classifier/splits.npz")
-test_idx = index["test_idx"]
+#index = np.load("/home/as3628/multi-task-learning/checkpoints/classifier/splits.npz")
+# test_idx = index["test_idx"]
 
-test_idx = list(range(n_test))
+# test_idx = list(range(n_test))
+indices = list(range(n_test))
 
-test_data = Subset(data, test_idx)
+test_data = Subset(data, indices)
 
 
 # create dataloader
@@ -112,7 +113,7 @@ test_dataloader = DataLoader(
 ###################################################################### Logger #####################################################################
 # create logger for checkpoints
 log_dir = "logs"
-name = "30_angles_sigma_0.3_fine_tunning_30_0.3_true_digits"
+name = "30_angles_sigma_0.3_ft_JAdler_test"
 
 os.makedirs(log_dir, exist_ok=True)
 handlers = [logging.StreamHandler()]

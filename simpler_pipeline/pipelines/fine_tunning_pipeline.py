@@ -47,7 +47,7 @@ H = 28
 W = 28
 num_angles = 30 #60
 i_0 = 10**5
-sigma_data = 0.3
+sigma_data = 0.1
 patch = 28
 rad = patch // 2
 ymin, ymax = rad, H - rad - 1
@@ -66,17 +66,17 @@ beta2 = 2e-2
 lambda_par = 0
 accelerator = Accelerator()
 device = accelerator.device
-n_train = 500
-n_val = 128
+n_train = 5000
+n_val = 128*2
 batch_size = 128
 eps = 1e-12
 lr = 1e-4
 weight_decay = 1e-4
-rho = 0.090
+rho = 0.090  #0.090 hace que en 10 pasos haya aprox 40% en la clase principal
 C = 0.5
 
 
-results_dir = "simpler_pipeline/Results/Just_Classification/fine_tunning_JAdler"
+results_dir = "simpler_pipeline/Results/Just_Classification/fine_tunning_JAdler_cleaner_0.1"
 classifier_dir = "/home/as3628/multi-task-learning/checkpoints/classifier"
 
 
@@ -196,7 +196,7 @@ def sirt_step(x, y, D, M, alpha):
     return x_new, step_data
 
 
-def patch_scores_for_digits( img, digit_probs, class_model, den_model, beta_class=1.0, beta_deno=1.0, sigma_data=1.0,):
+def patch_scores_for_digits( img, digit_probs, class_model, den_model, beta_class=1.0, beta_deno=1.0, sigma_data=1.0):
     class_model.eval()
 
     img_req = img.clone().detach().requires_grad_(True)
@@ -656,7 +656,7 @@ M_base = 1.0 / torch.clamp(row_sums, min=1e-8)
 D_base = 1.0 / torch.clamp(col_sums, min=1e-8)
 
 # build transitioning matrix
-P = build_transition_matrix(rho = rho, num_classes=10).to(device) # 0.090 hace que en 10 pasos haya aprox 40% en la clase principal
+P = build_transition_matrix(rho = rho, num_classes=10).to(device) 
 # print(f" P: {P}")
 # print(f" suma P: {P.sum(dim=1)}")
 
@@ -692,7 +692,7 @@ for batch_id, batch in enumerate(train_dataloader):
         torch.save({
                 "model": unwrapped_model.state_dict(),
                 "optimizer": optimizer.state_dict()
-                }, os.path.join(classifier_dir, "classifier_last_finetunned_noisy_labels.pt"))
+                }, os.path.join(classifier_dir, "classifier_last_finetunned_noisy_labels_JAdler_clean.pt"))
 
         if batch_id % 10 == 0:  
         
@@ -705,7 +705,7 @@ for batch_id, batch in enumerate(train_dataloader):
                 torch.save({
                     "model": unwrapped_model.state_dict(),
                     "optimizer": optimizer.state_dict()
-                }, os.path.join(classifier_dir, "classifier_best_finetunned_noisy_labels.pt"))
+                }, os.path.join(classifier_dir, "classifier_best_finetunned_noisy_labels_JAdler_clean.pt"))
             
             val_acc_history.append(val_acc)
             steps_history.append(batch_id)
