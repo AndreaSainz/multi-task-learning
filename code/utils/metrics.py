@@ -29,7 +29,7 @@ def compute_psnr(mse, max_val=1.0):
         >>> psnr = compute_psnr(mse_value)
     """
     
-    # if mse is a tensor, extract the value
+    # Convert scalar inputs to a tensor
     if not isinstance(mse, torch.Tensor):
         mse = torch.tensor(mse, dtype=torch.float32)
 
@@ -66,14 +66,9 @@ def compute_psnr_results(pred, target, max_val=1.0):
 
 
     #calculate the L2 value for the ground truth and prediction
-    mse = ((pred - target) ** 2).flatten(1).mean(dim=1)   # [B]
+    mse = compute_mse(pred, target)   # [B]
 
-    psnr = torch.empty_like(mse)
-    nonzero = mse > 0
-    psnr[nonzero] = 10 * torch.log10((max_val ** 2) / mse[nonzero])
-    psnr[~nonzero] = float("inf")
-
-    return psnr
+    return compute_psnr(mse, max_val)
 
 
 def compute_ssim(reconstructed, ground_truth, data_range):
@@ -125,8 +120,10 @@ def compute_ssim(reconstructed, ground_truth, data_range):
     return torch.stack(vals)   # [B]
 
 
+
 def compute_mse(pred, target):
     return ((pred - target) ** 2).flatten(1).mean(dim=1)
+
 
 def update_confusion_matrix(cm, logits, target, num_classes=10):
     """
@@ -140,14 +137,15 @@ def update_confusion_matrix(cm, logits, target, num_classes=10):
         cm[t.long(), p.long()] += 1
     return cm
 
+
 def metrics_from_confusion_matrix(cm, eps=1e-8):
     """
     Returns accuracy, macro precision, macro recall, macro f1 from confusion matrix.
     """
     cm = cm.float()
-    tp = torch.diag(cm)
-    fp = cm.sum(dim=0) - tp
-    fn = cm.sum(dim=1) - tp
+    tp = torch.diag(cm) #[classes]
+    fp = cm.sum(dim=0) - tp #[classes]
+    fn = cm.sum(dim=1) - tp #[classes]
 
     precision_per_class = tp / (tp + fp + eps)
     recall_per_class    = tp / (tp + fn + eps)
@@ -168,7 +166,7 @@ def metrics_from_confusion_matrix(cm, eps=1e-8):
 
 def compute_metric_classifier(pred, target, num_classes=10):
     """
-    Computes macro-averaged precision, recall, F1-score and accuracy.
+    Computes macro-averaged precision, recall F1-score and accuracy.
     """
 
     # Predicted class labels

@@ -7,6 +7,7 @@ import tomosipo as ts
 from torch.utils.data import DataLoader, random_split
 from code.dataloader.data_loader import MnistDataset
 from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
+from code.utils.logger import setup_logger
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -101,17 +102,11 @@ train_dataloader = DataLoader(
 # create logger for checkpoints
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
+name = "nf_lineas"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(os.path.join(log_dir, "4lineasvacias.log")),
-        logging.StreamHandler()
-    ]
-)
+logger = setup_logger(log_dir, name)
 
-logger = logging.getLogger(__name__)
+
 
 
 #Check if the dataset is balanced
@@ -121,7 +116,6 @@ counts = torch.bincount(labels_bal, minlength=10)
 logger.info("Balanced dataset label counts:")
 for d in range(10):
     logger.info(f"Digit {d}: {counts[d].item()}")
-
 
 ###################################################################### Trained NF Model #####################################################################
 
@@ -162,7 +156,7 @@ for i in range(L):
 mu_model = nf.MultiscaleFlow(q0, flows, merges)
 mu_model = mu_model.to(device)
 
-checkpoint = torch.load("glow_mnist_checkpoint_mixed.pt", map_location=device)
+checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/normalizing flow/glow_mnist_checkpoint_clean.pt", map_location=device)
 mu_model.load_state_dict(checkpoint["model_state_dict"])
 
 mu_model.eval() 
@@ -253,9 +247,9 @@ def model(y, batch_id, x, centre, digit):
     #x = torch.zeros(B, 1, H, W, device=y.device)
     
 
-    if batch_id == 0:
-        dx_norm_mean = torch.zeros(T, device=y.device)
-        dx_norm_b0 = torch.zeros(T, device=y.device)  # una muestra
+    # if batch_id == 0:
+    #     dx_norm_mean = torch.zeros(T, device=y.device)
+    #     dx_norm_b0 = torch.zeros(T, device=y.device)  # una muestra
 
     for t in range(T_ini):
         x_prev = x
@@ -268,27 +262,27 @@ def model(y, batch_id, x, centre, digit):
         # x = x + step_data
 
         # debugging || x^{k+1} -x^k||
-        if batch_id == 0:
-            dx = x - x_prev
-            dx_norm_b0[t]   = dx[0].flatten().norm()
-            dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()
+        # if batch_id == 0:
+        #     dx = x - x_prev
+        #     dx_norm_b0[t]   = dx[0].flatten().norm()
+        #     dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()
             
-    if batch_id == 0:
-        plt.figure()
-        plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
-        plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
-        plt.yscale("log")
-        plt.xlabel("t")
-        plt.ylabel("$||x_{t+1}-x_t||$")
-        plt.legend()
-        plt.savefig("simpler_pipeline/results/initial_dx_norm_batch0_4lineasvacias.png", dpi=300, bbox_inches="tight")
-        plt.close()
+    # if batch_id == 0:
+    #     plt.figure()
+    #     plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
+    #     plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
+    #     plt.yscale("log")
+    #     plt.xlabel("t")
+    #     plt.ylabel("$||x_{t+1}-x_t||$")
+    #     plt.legend()
+    #     plt.savefig("simpler_pipeline/results/initial_dx_norm_batch0_4lineasvacias.png", dpi=300, bbox_inches="tight")
+    #     plt.close()
 
 
     if batch_id == 0:
         plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
         plt.colorbar()
-        plt.savefig("simpler_pipeline/results/first_sirt_image_4lineasvacias.png", dpi=300, bbox_inches="tight")
+        plt.savefig("simpler_pipeline/Results/first_sirt_image_lineas.png", dpi=300, bbox_inches="tight")
         plt.close()
 
     # x for only SIRT
@@ -330,11 +324,11 @@ def model(y, batch_id, x, centre, digit):
         else:
             beta_i = beta
 
-        if batch_id == 0:
-            dx_norm_mean = torch.zeros(T, device=y.device)
-            dx_norm_b0 = torch.zeros(T, device=y.device)  # una muestra
-            dx_norm_mean_sirt = torch.zeros(T, device=y.device)
-            dx_norm_b0_sirt = torch.zeros(T, device=y.device)  # una muestra
+        # if batch_id == 0:
+        #     dx_norm_mean = torch.zeros(T, device=y.device)
+        #     dx_norm_b0 = torch.zeros(T, device=y.device)  # una muestra
+        #     dx_norm_mean_sirt = torch.zeros(T, device=y.device)
+        #     dx_norm_b0_sirt = torch.zeros(T, device=y.device)  # una muestra
 
         # reconstruction
         for t in range(T):
@@ -376,7 +370,7 @@ def model(y, batch_id, x, centre, digit):
             if batch_id == 0 and i % 2 == 0 and t==0:
                 plt.imshow(grad_crop[0,0].detach().cpu().numpy(), cmap="gray")
                 plt.colorbar()
-                plt.savefig(f"simpler_pipeline/results/{i}_grad_crop_4lineasvacias.png", dpi=300, bbox_inches="tight")
+                plt.savefig(f"simpler_pipeline/Results/{i}_grad_crop_lineas.png", dpi=300, bbox_inches="tight")
                 plt.close()
 
             x_scaled = x.clone()
@@ -399,10 +393,10 @@ def model(y, batch_id, x, centre, digit):
             x = x - step_F
 
             # debugging || x^{k+1} -x^k||
-            if batch_id == 0:
-                dx = x - x_prev
-                dx_norm_b0[t] = dx[0].flatten().norm()          # norma para el primer elemento del batch
-                dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()                  # media batch
+            # if batch_id == 0:
+            #     dx = x - x_prev
+            #     dx_norm_b0[t] = dx[0].flatten().norm()          # norma para el primer elemento del batch
+            #     dx_norm_mean[t] = dx.flatten(1).norm(dim=1).mean()                  # media batch
 
 
             #only SIRT
@@ -414,76 +408,76 @@ def model(y, batch_id, x, centre, digit):
             x_sirt = x_sirt.clamp(0,1)
 
             # debugging || x^{k+1} -x^k||
-            if batch_id == 0:
-                dx = x_sirt - x_sirt_prev
-                dx_norm_b0_sirt[t] = dx[0].flatten().norm()          # norma por elemento del batch
-                dx_norm_mean_sirt[t] = dx.flatten(1).norm(dim=1).mean()             # media batch
+            # if batch_id == 0:
+            #     dx = x_sirt - x_sirt_prev
+            #     dx_norm_b0_sirt[t] = dx[0].flatten().norm()          # norma por elemento del batch
+            #     dx_norm_mean_sirt[t] = dx.flatten(1).norm(dim=1).mean()             # media batch
 
-        if batch_id == 0:
-            plt.figure()
-            plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
-            plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
-            plt.plot(dx_norm_mean_sirt.detach().cpu().numpy(), label="mean over batch SIRT")
-            plt.plot(dx_norm_b0_sirt.detach().cpu().numpy(), label="sample 0 SIRT")
-            plt.yscale("log")
-            plt.xlabel("t")
-            plt.ylabel("$||x_{t+1}-x_t||$")
-            plt.legend()
-            plt.savefig(f"simpler_pipeline/results/{i}_dx_norm_batch0_4lineasvacias.png", dpi=300, bbox_inches="tight")
-            plt.close()
+        # if batch_id == 0:
+        #     plt.figure()
+        #     plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
+        #     plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
+        #     plt.plot(dx_norm_mean_sirt.detach().cpu().numpy(), label="mean over batch SIRT")
+        #     plt.plot(dx_norm_b0_sirt.detach().cpu().numpy(), label="sample 0 SIRT")
+        #     plt.yscale("log")
+        #     plt.xlabel("t")
+        #     plt.ylabel("$||x_{t+1}-x_t||$")
+        #     plt.legend()
+        #     plt.savefig(f"simpler_pipeline/results/{i}_dx_norm_batch0_4lineasvacias.png", dpi=300, bbox_inches="tight")
+        #     plt.close()
 
         if batch_id == 0 and i % 2 == 0:
             plt.imshow(x_sirt[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig(f"simpler_pipeline/results/{i}_sirt_4lineasvacias.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/Results/{i}_sirt_lineas.png", dpi=300, bbox_inches="tight")
             plt.close()
 
             plt.imshow(x[0,0].detach().cpu().numpy(), cmap="gray")
             plt.colorbar()
-            plt.savefig(f"simpler_pipeline/results/{i}_flow_4lineasvacias.png", dpi=300, bbox_inches="tight")
+            plt.savefig(f"simpler_pipeline/Results/{i}_flow_lineas.png", dpi=300, bbox_inches="tight")
             plt.close()
 
         
 
         #center 
-        with torch.no_grad():
-            # map_x[b, y, x] will store a "score" for placing the 28x28 crop center at (y, x).
-            # We only fill valid centers (14..85) so the crop stays inside the 100x100 image.
-            map_x = map_x = score_centers_with_unfold(
-                            model =mu_model,
-                            img = x,
-                            digit_cond=digit,          
-                            H=H, W=W,
-                            patch=28,
-                            ymin=14, ymax=85, xmin=14, xmax=85,
-                            chunk_size=512  # prueba 256/512/1024 según memoria
-                        )
+        # with torch.no_grad():
+        #     # map_x[b, y, x] will store a "score" for placing the 28x28 crop center at (y, x).
+        #     # We only fill valid centers (14..85) so the crop stays inside the 100x100 image.
+        #     map_x = map_x = score_centers_with_unfold(
+        #                     model =mu_model,
+        #                     img = x,
+        #                     digit_cond=digit,          
+        #                     H=H, W=W,
+        #                     patch=28,
+        #                     ymin=14, ymax=85, xmin=14, xmax=85,
+        #                     chunk_size=512  # prueba 256/512/1024 según memoria
+        #                 )
 
-        flat = map_x.view(B, -1)          # [B, H*W]
-        best_idx = flat.argmax(dim=1)     # [B]
+        # flat = map_x.view(B, -1)          # [B, H*W]
+        # best_idx = flat.argmax(dim=1)     # [B]
 
-        cy = best_idx // W
-        cx = best_idx %  W
+        # cy = best_idx // W
+        # cx = best_idx %  W
 
-        centre_new = torch.stack([cy, cx], dim=1)   # [B,2]
-        centre_new = torch.stack([cy, cx], dim=1)                     # [B, 2]
-        centre_new[:,0] = centre_new[:,0].clamp(14, H-14)
-        centre_new[:,1] = centre_new[:,1].clamp(14, W-14)
+        # centre_new = torch.stack([cy, cx], dim=1)   # [B,2]
+        # centre_new = torch.stack([cy, cx], dim=1)                     # [B, 2]
+        # centre_new[:,0] = centre_new[:,0].clamp(14, H-14)
+        # centre_new[:,1] = centre_new[:,1].clamp(14, W-14)
 
         
 
-        # digit 
-        crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-        for b in range(B):
-            cy = int(centre[b, 0].item())
-            cx = int(centre[b, 1].item())
-            crop_x[b:b+1] = x[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+        # # digit 
+        # crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
+        # for b in range(B):
+        #     cy = int(centre[b, 0].item())
+        #     cx = int(centre[b, 1].item())
+        #     crop_x[b:b+1] = x[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
 
-        with torch.no_grad():
-            map_digit = torch.full((B, 10), -torch.inf, device=y.device)
-            for d in range(0,10):
-                d_vec = torch.full((B,), d, dtype=torch.long, device=y.device) #it could be one hot or one digit for this model
-                map_digit[:, d] =  - mu_model(crop_x, d_vec).view(B)
+        # with torch.no_grad():
+        #     map_digit = torch.full((B, 10), -torch.inf, device=y.device)
+        #     for d in range(0,10):
+        #         d_vec = torch.full((B,), d, dtype=torch.long, device=y.device) #it could be one hot or one digit for this model
+        #         map_digit[:, d] =  - mu_model(crop_x, d_vec).view(B)
 
         #digit = torch.softmax(map_digit, dim=1)
         #centre = centre_new
@@ -584,11 +578,11 @@ results = {
     "model_images": model_images,      # [batch][iter][B,1,H,W]
     "sirt_images": sirt_images,
     "model_digits": model_digits,
-    "model_centers": model_centers,
+    "model_centers": model_centers
     }
 
 
-torch.save(results, "simpler_pipeline/results/results_mnist_ct_4lineasvacias.pt")
+torch.save(results, "simpler_pipeline/Results/results_mnist_ct_lineas.pt")
 
 
 for h in list(logger.handlers):

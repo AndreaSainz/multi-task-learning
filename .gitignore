@@ -426,3 +426,6 @@ FodyWeavers.xsd
 # Data
 data/**
 mnist_data/**
+
+# Checkpoints
+checkpoints/**

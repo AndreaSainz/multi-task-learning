@@ -58,11 +58,11 @@ xmin, xmax = rad, W - rad - 1
 T_ini = 20
 T_max = 20
 T_min = 1
-decay_iters = 10
-I = 10
+decay_iters = 5
+I = 5
 alpha = 0.1 
-beta1 =  0.3
-beta2 = 2e-2
+beta1 =  0.5
+beta2 = 0.08
 lambda_par = 0
 accelerator = Accelerator()
 device = accelerator.device
@@ -73,10 +73,10 @@ eps = 1e-12
 lr = 1e-4
 weight_decay = 1e-4
 rho = 0.090  #0.090 hace que en 10 pasos haya aprox 40% en la clase principal
-C = 0.5
+C = 0.4
 
 
-results_dir = "simpler_pipeline/Results/Just_Classification/fine_tunning_JAdler_cleaner_0.1"
+results_dir = "simpler_pipeline/Results/Just_Classification"
 classifier_dir = "/home/as3628/multi-task-learning/checkpoints/classifier"
 
 
@@ -133,7 +133,7 @@ val_dataloader = DataLoader(
 # LOGGER
 # create logger for checkpoints
 log_dir = "logs"
-name = "30_angles_sigma_0.3_ft"
+name = "angles=30_sigma=0.1_iter=5_C=0.4_rho=0.090"
 
 os.makedirs(log_dir, exist_ok=True)
 handlers = [logging.StreamHandler()]
@@ -524,7 +524,7 @@ def model(y, D, M, batch_id, x_true, digit_true, vector_of_labels):
                 f"[SSIM] I={i} | steps={T} | x={ssim_x_init.mean().item():.4f} | x_sirt={ssim_sirt_init.mean().item():.4f}"
             )
 
-        if accelerator.is_main_process and i % 5 == 0: 
+        if accelerator.is_main_process and i % 2 == 0 and batch_id == 0: 
             for b in range(min(10,B)):
 
                 # --- SIRT ---
@@ -692,7 +692,7 @@ for batch_id, batch in enumerate(train_dataloader):
         torch.save({
                 "model": unwrapped_model.state_dict(),
                 "optimizer": optimizer.state_dict()
-                }, os.path.join(classifier_dir, "classifier_last_finetunned_noisy_labels_JAdler_clean.pt"))
+                }, os.path.join(classifier_dir, "classifier_last_finetunned_{name}.pt"))
 
         if batch_id % 10 == 0:  
         
@@ -705,13 +705,13 @@ for batch_id, batch in enumerate(train_dataloader):
                 torch.save({
                     "model": unwrapped_model.state_dict(),
                     "optimizer": optimizer.state_dict()
-                }, os.path.join(classifier_dir, "classifier_best_finetunned_noisy_labels_JAdler_clean.pt"))
+                }, os.path.join(classifier_dir, "classifier_best_finetunned_{name}.pt"))
             
             val_acc_history.append(val_acc)
             steps_history.append(batch_id)
 
         if batch_id== 0:
-            for b in range(20):
+            for b in range(5):
                 # take last image from the list
                 img = ground_truth_1[b,0].detach().cpu().numpy()
                 img_both = images[-1][b, 0].detach().cpu().numpy()
