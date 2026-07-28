@@ -3,7 +3,7 @@ import torch.nn.functional as F
 from accelerate import Accelerator
 from tomosipo.torch_support import to_autograd
 import tomosipo as ts
-
+import os
 
 def extract_crops(x, centre):
     B = x.shape[0]

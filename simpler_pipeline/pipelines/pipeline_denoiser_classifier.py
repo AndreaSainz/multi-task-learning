@@ -50,10 +50,10 @@ xmin, xmax = rad, W - rad - 1
 
 
 ### training parameters
-T_ini = 100
-T_max = 80
-T_min = 1
-decay_iters = 10
+T_ini = 80
+T_max = 70
+T_min = 70
+decay_iters = 70
 I = 10
 tol_dx = 1e-3
 patience_dx = 3
@@ -123,7 +123,7 @@ train_dataloader = DataLoader(
 ###################################################################### Logger #####################################################################
 # create logger for checkpoints
 log_dir = "logs"
-name = "30_angles_sigma_0.3_1e-1_5e-2_500samples"
+name = "60_angles_sigma_0.3"
 
 os.makedirs(log_dir, exist_ok=True)
 handlers = [logging.StreamHandler()]
@@ -155,7 +155,7 @@ if accelerator.is_main_process:
 
 class_model = CNNClassifier()
 
-checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/classifier/cnn_classifier_clean_best.pt", map_location="cpu")
+checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/classifier/classifier_best_finetunned.pt", map_location="cpu")
 class_model.load_state_dict(checkpoint)
 
 class_model.eval() 
@@ -630,16 +630,16 @@ def model(y, batch_id, x_true, centre_true, digit_true):
         "psnr_x_deno_crop": psnr_x_init_crop.detach().cpu()
     })
 
-    if accelerator.is_main_process and batch_id == 0:
-        plt.figure() 
-        plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
-        plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
-        plt.yscale("log")
-        plt.xlabel("t")
-        plt.ylabel("$||x_{t+1}-x_t||$")
-        plt.legend()
-        plt.savefig(os.path.join(results_dir, f"{batch_id}_initial_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
-        plt.close()
+    # if accelerator.is_main_process and batch_id == 0:
+    #     plt.figure() 
+    #     plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
+    #     plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
+    #     plt.yscale("log")
+    #     plt.xlabel("t")
+    #     plt.ylabel("$||x_{t+1}-x_t||$")
+    #     plt.legend()
+    #     plt.savefig(os.path.join(results_dir, f"{batch_id}_initial_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
+    #     plt.close()
 
 
     # x for only SIRT
@@ -663,15 +663,17 @@ def model(y, batch_id, x_true, centre_true, digit_true):
 
     #digit = torch.full((B, 10), 0.1, device=y.device)
 
-    centre = torch.zeros((B, H, W), device=x.device)
-    centre_true = centre_true.to(x.device)
-    y = centre_true[:, 0].long()
-    x = centre_true[:, 1].long()
+    # centre = torch.zeros((B, H, W), device=x.device)
+    # centre_true = centre_true.to(x.device)
+    # y = centre_true[:, 0].long()
+    # x = centre_true[:, 1].long()
 
-    centre[torch.arange(B, device=x.device), y, x] = 1.0
+    # centre[torch.arange(B, device=x.device), y, x] = 1.0
 
     # area = (ymax - ymin + 1) * (xmax - xmin + 1)
     # centre[:, ymin:ymax+1, xmin:xmax+1] = 1.0 / area
+    centre_true = centre_true.to(x.device)
+    centre = centre_true.clone()
     centre_sirt = centre.clone()
     eps = 1e-12
 
@@ -730,42 +732,42 @@ def model(y, batch_id, x_true, centre_true, digit_true):
         logger.info(f"First centre: {centre}")
 
 
-    digit_prob_true = digit.gather(1, digit_true.unsqueeze(1)).squeeze(1)
-    digit_nll = -torch.log(digit_prob_true.clamp_min(eps))
-    digit_entropy = -(digit * torch.log(digit.clamp_min(eps))).sum(dim=1)
+    # digit_prob_true = digit.gather(1, digit_true.unsqueeze(1)).squeeze(1)
+    # digit_nll = -torch.log(digit_prob_true.clamp_min(eps))
+    # digit_entropy = -(digit * torch.log(digit.clamp_min(eps))).sum(dim=1)
 
     
-    # Wasserstein-1
-    centre_true = centre_true.long()
+    # # Wasserstein-1
+    # centre_true = centre_true.long()
 
-    Hc, Wc = centre.shape[1], centre.shape[2]
+    # Hc, Wc = centre.shape[1], centre.shape[2]
 
-    ys = torch.arange(Hc, device=centre.device).view(1, Hc, 1).float()
-    xs = torch.arange(Wc, device=centre.device).view(1, 1, Wc).float()
+    # ys = torch.arange(Hc, device=centre.device).view(1, Hc, 1).float()
+    # xs = torch.arange(Wc, device=centre.device).view(1, 1, Wc).float()
 
-    cy_true = centre_true[:, 0].view(B, 1, 1).float()
-    cx_true = centre_true[:, 1].view(B, 1, 1).float()
+    # cy_true = centre_true[:, 0].view(B, 1, 1).float()
+    # cx_true = centre_true[:, 1].view(B, 1, 1).float()
 
-    dist_map = torch.sqrt((ys - cy_true)**2 + (xs - cx_true)**2)   # [B,H,W]
-    centre_w1 = (centre * dist_map).sum(dim=(1, 2))   # [B]
+    # dist_map = torch.sqrt((ys - cy_true)**2 + (xs - cx_true)**2)   # [B,H,W]
+    # centre_w1 = (centre * dist_map).sum(dim=(1, 2))   # [B]
 
     
 
-    digit_acc_history.append({
-        "I": -1,
-        "digit_nll": digit_nll.detach().cpu(),
-        "digit_prob_true": digit_prob_true.detach().cpu(),
-        "digit_entropy": digit_entropy.detach().cpu(),
-        "digit_nll_sirt": digit_nll.detach().cpu(),
-        "digit_prob_true_sirt": digit_prob_true.detach().cpu(),
-        "digit_entropy_sirt": digit_entropy.detach().cpu()
-        })
+    # digit_acc_history.append({
+    #     "I": -1,
+    #     "digit_nll": digit_nll.detach().cpu(),
+    #     "digit_prob_true": digit_prob_true.detach().cpu(),
+    #     "digit_entropy": digit_entropy.detach().cpu(),
+    #     "digit_nll_sirt": digit_nll.detach().cpu(),
+    #     "digit_prob_true_sirt": digit_prob_true.detach().cpu(),
+    #     "digit_entropy_sirt": digit_entropy.detach().cpu()
+    #     })
 
-    centre_mse_history.append({
-        "I": -1,
-        "centre_w1": centre_w1.detach().cpu(),
-        "centre_w1_sirt": centre_w1.detach().cpu()
-    })
+    # centre_mse_history.append({
+    #     "I": -1,
+    #     "centre_w1": centre_w1.detach().cpu(),
+    #     "centre_w1_sirt": centre_w1.detach().cpu()
+    # })
 
     
 
@@ -773,8 +775,8 @@ def model(y, batch_id, x_true, centre_true, digit_true):
     images_SIRT.append(x.detach().cpu())
     centers.append(centre.detach().cpu())
     digits.append(digit.detach().cpu())
-    centers_sirt_all.append(centre_sirt.detach().cpu())
-    digits_sirt_all.append(digit_sirt.detach().cpu())
+    # centers_sirt_all.append(centre_sirt.detach().cpu())
+    # digits_sirt_all.append(digit_sirt.detach().cpu())
 
     ###### model loop
 
@@ -1008,57 +1010,57 @@ def model(y, batch_id, x_true, centre_true, digit_true):
         # centre = map_x
         # centre_sirt = map_x_sirt
 
-        digit_prob_true = digit.gather(1, digit_true.unsqueeze(1)).squeeze(1)
-        digit_nll = -torch.log(digit_prob_true.clamp_min(eps))
-        digit_entropy = -(digit * torch.log(digit.clamp_min(eps))).sum(dim=1)
-        #centre_prob_true = centre[ torch.arange(B, device=centre.device), centre_true[:, 0], centre_true[:, 1]]   # [B]
-        # Wasserstein-1
-        centre_true = centre_true.long()
+        # digit_prob_true = digit.gather(1, digit_true.unsqueeze(1)).squeeze(1)
+        # digit_nll = -torch.log(digit_prob_true.clamp_min(eps))
+        # digit_entropy = -(digit * torch.log(digit.clamp_min(eps))).sum(dim=1)
+        # #centre_prob_true = centre[ torch.arange(B, device=centre.device), centre_true[:, 0], centre_true[:, 1]]   # [B]
+        # # Wasserstein-1
+        # centre_true = centre_true.long()
 
-        Hc, Wc = centre.shape[1], centre.shape[2]
+        # Hc, Wc = centre.shape[1], centre.shape[2]
 
-        ys = torch.arange(Hc, device=centre.device).view(1, Hc, 1).float()
-        xs = torch.arange(Wc, device=centre.device).view(1, 1, Wc).float()
+        # ys = torch.arange(Hc, device=centre.device).view(1, Hc, 1).float()
+        # xs = torch.arange(Wc, device=centre.device).view(1, 1, Wc).float()
 
-        cy_true = centre_true[:, 0].view(B, 1, 1).float()
-        cx_true = centre_true[:, 1].view(B, 1, 1).float()
+        # cy_true = centre_true[:, 0].view(B, 1, 1).float()
+        # cx_true = centre_true[:, 1].view(B, 1, 1).float()
 
-        dist_map = torch.sqrt((ys - cy_true)**2 + (xs - cx_true)**2)   # [B,H,W]
+        # dist_map = torch.sqrt((ys - cy_true)**2 + (xs - cx_true)**2)   # [B,H,W]
 
-        centre_w1 = (centre * dist_map).sum(dim=(1, 2))   # [B]
-
-
-        digit_prob_true_sirt = digit_sirt.gather(1, digit_true.unsqueeze(1)).squeeze(1)
-        digit_nll_sirt = -torch.log(digit_prob_true_sirt.clamp_min(eps))
-        digit_entropy_sirt = -(digit_sirt * torch.log(digit_sirt.clamp_min(eps))).sum(dim=1)
-        #centre_prob_true = centre[ torch.arange(B, device=centre.device), centre_true[:, 0], centre_true[:, 1]]   # [B]
-        # Wasserstein-1
-
-        Hc, Wc = centre_sirt.shape[1], centre_sirt.shape[2]
-
-        ys = torch.arange(Hc, device=centre_sirt.device).view(1, Hc, 1).float()
-        xs = torch.arange(Wc, device=centre_sirt.device).view(1, 1, Wc).float()
+        # centre_w1 = (centre * dist_map).sum(dim=(1, 2))   # [B]
 
 
-        dist_map_sirt = torch.sqrt((ys - cy_true)**2 + (xs - cx_true)**2)   # [B,H,W]
+        # digit_prob_true_sirt = digit_sirt.gather(1, digit_true.unsqueeze(1)).squeeze(1)
+        # digit_nll_sirt = -torch.log(digit_prob_true_sirt.clamp_min(eps))
+        # digit_entropy_sirt = -(digit_sirt * torch.log(digit_sirt.clamp_min(eps))).sum(dim=1)
+        # #centre_prob_true = centre[ torch.arange(B, device=centre.device), centre_true[:, 0], centre_true[:, 1]]   # [B]
+        # # Wasserstein-1
 
-        centre_w1_sirt = (centre_sirt * dist_map_sirt).sum(dim=(1, 2))   # [B]
+        # Hc, Wc = centre_sirt.shape[1], centre_sirt.shape[2]
 
-        digit_acc_history.append({
-            "I": i,
-            "digit_nll": digit_nll.detach().cpu(),
-            "digit_prob_true": digit_prob_true.detach().cpu(),
-            "digit_entropy": digit_entropy.detach().cpu(),
-            "digit_nll_sirt": digit_nll_sirt.detach().cpu(),
-            "digit_prob_true_sirt": digit_prob_true_sirt.detach().cpu(),
-            "digit_entropy_sirt": digit_entropy_sirt.detach().cpu()
-            })
+        # ys = torch.arange(Hc, device=centre_sirt.device).view(1, Hc, 1).float()
+        # xs = torch.arange(Wc, device=centre_sirt.device).view(1, 1, Wc).float()
 
-        centre_mse_history.append({
-            "I": i,
-            "centre_w1": centre_w1.detach().cpu(),
-            "centre_w1_sirt": centre_w1_sirt.detach().cpu()
-        })
+
+        # dist_map_sirt = torch.sqrt((ys - cy_true)**2 + (xs - cx_true)**2)   # [B,H,W]
+
+        # centre_w1_sirt = (centre_sirt * dist_map_sirt).sum(dim=(1, 2))   # [B]
+
+        # digit_acc_history.append({
+        #     "I": i,
+        #     "digit_nll": digit_nll.detach().cpu(),
+        #     "digit_prob_true": digit_prob_true.detach().cpu(),
+        #     "digit_entropy": digit_entropy.detach().cpu(),
+        #     "digit_nll_sirt": digit_nll_sirt.detach().cpu(),
+        #     "digit_prob_true_sirt": digit_prob_true_sirt.detach().cpu(),
+        #     "digit_entropy_sirt": digit_entropy_sirt.detach().cpu()
+        #     })
+
+        # centre_mse_history.append({
+        #     "I": i,
+        #     "centre_w1": centre_w1.detach().cpu(),
+        #     "centre_w1_sirt": centre_w1_sirt.detach().cpu()
+        # })
 
         
 
@@ -1073,8 +1075,8 @@ def model(y, batch_id, x_true, centre_true, digit_true):
         images_deno.append(x_deno.detach().cpu())
         centers.append(centre.detach().cpu())
         digits.append(digit.detach().cpu())
-        centers_sirt_all.append(centre_sirt.detach().cpu())
-        digits_sirt_all.append(digit_sirt.detach().cpu())
+        # centers_sirt_all.append(centre_sirt.detach().cpu())
+        # digits_sirt_all.append(digit_sirt.detach().cpu())
 
         del crop_x, crop_x_both, crop_x_sirt, crop_x_class, crop_x_deno
         del map_x, logits, map_digit

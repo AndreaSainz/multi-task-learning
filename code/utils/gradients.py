@@ -5,12 +5,13 @@ from tomosipo.torch_support import to_autograd
 import tomosipo as ts
 import matplotlib
 matplotlib.use("Agg")
+import os
 import matplotlib.pyplot as plt
 from code.ct_recon.SIRT import sirt_step
 from code.utils.image_cropping import extract_crops, insert_crop_grad_in_image
 
 
-def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, i, r, batch_id, mode, regularization_grad):
+def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, i, r, batch_id, mode, regularization_grad, results_dir, name):
     x, step_data = sirt_step(A_torch, AT_torch, x, y, alpha)
     if mode == "none":
         return x.clamp(0, 1), step_data
