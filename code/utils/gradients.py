@@ -6,10 +6,12 @@ import tomosipo as ts
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from code.ct_recon.SIRT import sirt_step
+from code.utils.image_cropping import extract_crops, insert_crop_grad_in_image
 
 
-def update_case(x, y, centre, digit, alpha, i, r, batch_id, mode):
-    x, step_data = sirt_step(x, y, alpha)
+def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, i, r, batch_id, mode, regularization_grad):
+    x, step_data = sirt_step(A_torch, AT_torch, x, y, alpha)
     if mode == "none":
         return x.clamp(0, 1), step_data
 
@@ -25,23 +27,6 @@ def update_case(x, y, centre, digit, alpha, i, r, batch_id, mode):
 
     return x, step_data
 
-
-def regularization_grad(crop_x, digit, i, batch_id, r):
-    idx = 0 if i == 0 else 1
-    B = crop_x.shape[0]
-    x_t = (
-        sqrtab[t].view(B, 1, 1, 1) * crop_x
-        + sqrtmab[t].view(B, 1, 1, 1) * fixed_noise
-    )
-    with torch.no_grad():
-        eps_hat = score_model(crop_x, digit, t_input, context_mask)
-    score = - eps_hat / sqrtmab[t].view(B, 1, 1, 1)
-
-    grad_crop = -(sigma_data**2) * (gamma[idx] * score)
-    if accelerator.is_main_process:
-        logger.info(f"Gradient descent step {batch_id}_{i}_{r}: {-grad_crop.flatten(1).norm(dim=1).mean().item()}")
-
-    return grad_crop
 
 
 def score_centers_difussion_model(

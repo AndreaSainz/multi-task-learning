@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, random_split
 from code.dataloader.data_loader import MnistDataset
 from code.models.score_unet import ContextUnet, ddpm_schedules
 from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
-from code.utils.gradients import update_case, regularization_grad, score_centers_difussion_model
+from code.utils.gradients import update_case, score_centers_difussion_model
 from code.utils.image_cropping import extract_crops, insert_crop_grad_in_image
 from code.ct_recon.SIRT import sirt_step
 import matplotlib
@@ -169,6 +169,24 @@ score_model, train_dataloader = accelerator.prepare(score_model, train_dataloade
 
 ###################################################################### Multi-task function #####################################################################
 
+def regularization_grad(crop_x, digit, i, batch_id, r):
+    idx = 0 if i == 0 else 1
+    B = crop_x.shape[0]
+    x_t = (
+        sqrtab[t].view(B, 1, 1, 1) * crop_x
+        + sqrtmab[t].view(B, 1, 1, 1) * fixed_noise
+    )
+    with torch.no_grad():
+        eps_hat = score_model(crop_x, digit, t_input, context_mask)
+    score = - eps_hat / sqrtmab[t].view(B, 1, 1, 1)
+
+    grad_crop = -(sigma_data**2) * (gamma[idx] * score)
+    if accelerator.is_main_process:
+        logger.info(f"Gradient descent step {batch_id}_{i}_{r}: {-grad_crop.flatten(1).norm(dim=1).mean().item()}")
+
+    return grad_crop
+
+
 def model(y, batch_id, x_true, centre_true, digit_true):
     images_SIRT = []
     images_class = []
@@ -180,6 +198,8 @@ def model(y, batch_id, x_true, centre_true, digit_true):
     digits_sirt_all = []
     psnr_history = []
     ssim_history = []   
+    digit_acc_history = []
+    centre_mse_history = []  
     
 
     B = y.shape[0]
@@ -193,8 +213,8 @@ def model(y, batch_id, x_true, centre_true, digit_true):
     
 
     #if batch_id == 0:
-    dx_norm_mean = torch.zeros(R_ini, device=y.device) 
-    dx_norm_b0 = torch.zeros(R_ini, device=y.device)  # una muestra
+    # dx_norm_mean = torch.zeros(R_ini, device=y.device) 
+    # dx_norm_b0 = torch.zeros(R_ini, device=y.device)  # una muestra
 
     for r in range(R_ini):
         x_prev = x
@@ -203,10 +223,10 @@ def model(y, batch_id, x_true, centre_true, digit_true):
             logger.info(f"Gradient descent step -1_{r}: {step_data.flatten(1).norm(dim=1).mean().item()}")
 
         # debugging || x^{k+1} -x^k||
-        if accelerator.is_main_process and batch_id == 0:
-            dx = x - x_prev 
-            dx_norm_b0[r]   = dx[0].flatten().norm()
-            dx_norm_mean[r] = dx.flatten(1).norm(dim=1).mean()
+        # if accelerator.is_main_process and batch_id == 0:
+        #     dx = x - x_prev 
+        #     dx_norm_b0[r]   = dx[0].flatten().norm()
+        #     dx_norm_mean[r] = dx.flatten(1).norm(dim=1).mean()
 
     # metrics after the initialization with SIRT (equi to I = -1, with T_ini steps)
     crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
@@ -251,16 +271,16 @@ def model(y, batch_id, x_true, centre_true, digit_true):
     
 
 
-    if accelerator.is_main_process and batch_id == 0:
-        plt.figure() 
-        plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
-        plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
-        plt.yscale("log")
-        plt.xlabel("r")
-        plt.ylabel("$||x_{r+1}-x_r||$")
-        plt.legend()
-        plt.savefig(os.path.join(results_dir, f"{batch_id}_initial_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
-        plt.close()
+    # if accelerator.is_main_process and batch_id == 0:
+    #     plt.figure() 
+    #     plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch")
+    #     plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
+    #     plt.yscale("log")
+    #     plt.xlabel("r")
+    #     plt.ylabel("$||x_{r+1}-x_r||$")
+    #     plt.legend()
+    #     plt.savefig(os.path.join(results_dir, f"{batch_id}_initial_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
+    #     plt.close()
 
 
     
@@ -277,62 +297,77 @@ def model(y, batch_id, x_true, centre_true, digit_true):
         plt.close()
 
     # DIGIT
-    digit = torch.full((B, 10), 0.1, device=y.device)
+    digit = torch.nn.functional.one_hot(digit_true, num_classes=10).float()
+    digit = digit.to(x.device)
+    digit_true = digit_true.to(x.device)
     digit_sirt = digit.clone()
 
+
+
+
+    # digit = torch.full((B, 10), 0.1, device=y.device)
+    # digit_sirt = digit.clone()
+
+    #CENTRE
     centre = torch.zeros((B, H, W), device=x.device)
-    area = (ymax - ymin + 1) * (xmax - xmin + 1)
-    centre[:, ymin:ymax+1, xmin:xmax+1] = 1.0 / area
+    centre_true = centre_true.to(x.device)
+    y = centre_true[:, 0].long()
+    x = centre_true[:, 1].long()
+
+    centre[torch.arange(B, device=x.device), y, x] = 1.0
+
+    # area = (ymax - ymin + 1) * (xmax - xmin + 1)
+    # centre[:, ymin:ymax+1, xmin:xmax+1] = 1.0 / area
     centre_sirt = centre.clone()
     eps = 1e-12
 
     
-    # CENTRE
-    with torch.no_grad():
-        # map_x[b, y, x] will store a "probability" for placing the 28x28 crop center at (y, x).
-        # We only fill valid centers (14..85) so the crop stays inside the 100x100 image.
-        map_x = score_centers_difussion_model(
-                        model =class_model,
-                        img = x_both,
-                        digit_cond=digit,      # [B,10], one-hot o soft
-                        denoiser=den_model,
-                        chunk_size=512  
-                    )
+    # # CENTRE
+    # with torch.no_grad():
+    #     # map_x[b, y, x] will store a "probability" for placing the 28x28 crop center at (y, x).
+    #     # We only fill valid centers (14..85) so the crop stays inside the 100x100 image.
+    #     map_x = score_centers_difussion_model(
+    #                     model =class_model,
+    #                     img = x_both,
+    #                     digit_cond=digit,      # [B,10], one-hot o soft
+    #                     denoiser=den_model,
+    #                     chunk_size=512  
+    #                 )
 
-    map_digit = torch.zeros(B, 10, device=y.device, dtype=x.dtype)
-    W_valid = xmax - xmin + 1
+    # map_digit = torch.zeros(B, 10, device=y.device, dtype=x.dtype)
+    # W_valid = xmax - xmin + 1
 
-    with torch.no_grad():
-        for b in range(B):
-            probs_centres = centre[b, ymin:ymax+1, xmin:xmax+1].reshape(-1)
-            k = min(5, probs_centres.numel())
+    # with torch.no_grad():
+    #     for b in range(B):
+    #         probs_centres = centre[b, ymin:ymax+1, xmin:xmax+1].reshape(-1)
+    #         k = min(5, probs_centres.numel())
 
-            vals, idxs = torch.topk(probs_centres, k=k)
+    #         vals, idxs = torch.topk(probs_centres, k=k)
 
-            crops_topk = torch.zeros(k, 1, 28, 28, device=y.device, dtype=x.dtype)
+    #         crops_topk = torch.zeros(k, 1, 28, 28, device=y.device, dtype=x.dtype)
 
-            for j, idx in enumerate(idxs):
-                idx = idx.item()
-                iy = idx // W_valid
-                ix = idx % W_valid
+    #         for j, idx in enumerate(idxs):
+    #             idx = idx.item()
+    #             iy = idx // W_valid
+    #             ix = idx % W_valid
 
-                cy = ymin + iy
-                cx = xmin + ix
+    #             cy = ymin + iy
+    #             cx = xmin + ix
 
-                crops_topk[j:j+1] = x_both[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-                crops_topk_sirt[j:j+1] = x_sirt[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+    #             crops_topk[j:j+1] = x_both[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+    #             crops_topk_sirt[j:j+1] = x_sirt[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
 
-            logits = class_model(crops_topk)
-            probs_digits = torch.softmax(logits, dim=1)
+    #         logits = class_model(crops_topk)
+    #         probs_digits = torch.softmax(logits, dim=1)
 
-            weights = vals / vals.sum().clamp_min(1e-12)
-            map_digit[b] = (weights.unsqueeze(1) * probs_digits).sum(dim=0)
+    #         weights = vals / vals.sum().clamp_min(1e-12)
+    #         map_digit[b] = (weights.unsqueeze(1) * probs_digits).sum(dim=0)
 
 
-    digit = map_digit
-    digit_sirt = digit.clone()
-    centre = map_x
-    centre_sirt = centre.clone()
+    # digit = map_digit
+    # digit_sirt = digit.clone()
+    # centre = map_x
+    # centre_sirt = centre.clone()
     
     if accelerator.is_main_process and batch_id == 0:
         logger.info(f"First digit: {digit}") 
@@ -395,30 +430,30 @@ def model(y, batch_id, x_true, centre_true, digit_true):
 
     for i in range(I):
 
-        if accelerator.is_main_process and batch_id == 0:
-            dx_norm_mean = torch.zeros(R, device=y.device) 
-            dx_norm_b0 = torch.zeros(R, device=y.device)  # una muestra
-            dx_norm_mean_sirt = torch.zeros(R, device=y.device)
-            dx_norm_b0_sirt = torch.zeros(R, device=y.device)  # una muestra
+        # if accelerator.is_main_process and batch_id == 0:
+        #     dx_norm_mean = torch.zeros(R, device=y.device) 
+        #     dx_norm_b0 = torch.zeros(R, device=y.device)  # una muestra
+        #     dx_norm_mean_sirt = torch.zeros(R, device=y.device)
+        #     dx_norm_b0_sirt = torch.zeros(R, device=y.device)  # una muestra
 
         # reconstruction
         for r in range(R):
             x_prev_both = x_score 
-            x_score , step_data = update_case(x_score, y, centre, digit, alpha, i, r, batch_id, "both")
+            x_score , step_data = update_case(x_score, y, A_torch, AT_torch, centre_true, digit_true, alpha, i, r, batch_id, "both", regularization_grad)
             if accelerator.is_main_process and batch_id ==0:
                 logger.info(f"Gradient descent step {i}_{r}: {step_data.flatten(1).norm(dim=1).mean().item()}")
 
         
             # debugging || x^{k+1} -x^k||
-            if accelerator.is_main_process and batch_id == 0:
-                dx = x_score - x_prev_both
-                dx_norm_b0[r] = dx[0].flatten().norm()          # norma para el primer elemento del batch
-                dx_norm_mean[r] = dx.flatten(1).norm(dim=1).mean()                  # media batch
+            # if accelerator.is_main_process and batch_id == 0:
+            #     dx = x_score - x_prev_both
+            #     dx_norm_b0[r] = dx[0].flatten().norm()          # norma para el primer elemento del batch
+            #     dx_norm_mean[r] = dx.flatten(1).norm(dim=1).mean()                  # media batch
 
 
             #only SIRT
             x_sirt_prev = x_sirt
-            x_sirt , _ = update_case(x_sirt, y, centre, digit, alpha, i, r, batch_id, "none")
+            x_sirt , _ = update_case(x_sirt, y, A_torch, AT_torch, centre_true, digit_true, alpha, i, r, batch_id, "none", regularization_grad)
 
             # debugging || x^{k+1} -x^k||
             if accelerator.is_main_process and batch_id == 0:
@@ -475,18 +510,18 @@ def model(y, batch_id, x_true, centre_true, digit_true):
 
         
 
-        if batch_id == 0:
-            plt.figure() 
-            plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch") 
-            plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
-            plt.plot(dx_norm_mean_sirt.detach().cpu().numpy(), label="mean over batch SIRT")
-            plt.plot(dx_norm_b0_sirt.detach().cpu().numpy(), label="sample 0 SIRT")
-            plt.yscale("log")
-            plt.xlabel("r")
-            plt.ylabel("$||x_{r+1}-x_r||$")
-            plt.legend()
-            plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
-            plt.close()
+        # if batch_id == 0:
+        #     plt.figure() 
+        #     plt.plot(dx_norm_mean.detach().cpu().numpy(), label="mean over batch") 
+        #     plt.plot(dx_norm_b0.detach().cpu().numpy(), label="sample 0")
+        #     plt.plot(dx_norm_mean_sirt.detach().cpu().numpy(), label="mean over batch SIRT")
+        #     plt.plot(dx_norm_b0_sirt.detach().cpu().numpy(), label="sample 0 SIRT")
+        #     plt.yscale("log")
+        #     plt.xlabel("r")
+        #     plt.ylabel("$||x_{r+1}-x_r||$")
+        #     plt.legend()
+        #     plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_dx_norm_batch0_{name}.png"), dpi=300, bbox_inches="tight")
+        #     plt.close()
 
         if  batch_id == 0 and i % 4 == 0:
             plt.imshow(x_sirt[0,0].detach().cpu().numpy(), cmap="gray")
@@ -502,73 +537,73 @@ def model(y, batch_id, x_true, centre_true, digit_true):
         
 
         #center 
-        with torch.no_grad():
-            # map_x[b, y, x] will store a "probability" for placing the 28x28 crop center at (y, x).
-            # We only fill valid centers (14..85) so the crop stays inside the 100x100 image.
-            map_x = score_centers_difussion_model(
-                            model =class_model,
-                            img = x_both,
-                            digit_cond=digit,      # [B,10], one-hot o soft
-                            denoiser=den_model,
-                            chunk_size=512  
-                        )
-            map_x_sirt = score_centers_difussion_model(
-                            model =class_model,
-                            img = x_sirt,
-                            digit_cond=digit_sirt,      # [B,10], one-hot o soft
-                            denoiser=den_model,
-                            chunk_size=512  
-                        )
+        # with torch.no_grad():
+        #     # map_x[b, y, x] will store a "probability" for placing the 28x28 crop center at (y, x).
+        #     # We only fill valid centers (14..85) so the crop stays inside the 100x100 image.
+        #     map_x = score_centers_difussion_model(
+        #                     model =class_model,
+        #                     img = x_both,
+        #                     digit_cond=digit,      # [B,10], one-hot o soft
+        #                     denoiser=den_model,
+        #                     chunk_size=512  
+        #                 )
+        #     map_x_sirt = score_centers_difussion_model(
+        #                     model =class_model,
+        #                     img = x_sirt,
+        #                     digit_cond=digit_sirt,      # [B,10], one-hot o soft
+        #                     denoiser=den_model,
+        #                     chunk_size=512  
+        #                 )
 
         
 
-        # digit 
-        map_digit = torch.zeros(B, 10, device=y.device, dtype=x.dtype)
-        map_digit_sirt = torch.zeros(B, 10, device=y.device, dtype=x.dtype)
+        # # digit 
+        # map_digit = torch.zeros(B, 10, device=y.device, dtype=x.dtype)
+        # map_digit_sirt = torch.zeros(B, 10, device=y.device, dtype=x.dtype)
 
-        W_valid = xmax - xmin + 1
+        # W_valid = xmax - xmin + 1
 
-        with torch.no_grad():
-            for b in range(B):
-                probs_centres = centre[b, ymin:ymax+1, xmin:xmax+1].reshape(-1)
-                probs_centres_sirt = centre_sirt[b, ymin:ymax+1, xmin:xmax+1].reshape(-1)
-                k = min(5, probs_centres.numel())
-                k_sirt = min(5, probs_centres_sirt.numel())
+        # with torch.no_grad():
+        #     for b in range(B):
+        #         probs_centres = centre[b, ymin:ymax+1, xmin:xmax+1].reshape(-1)
+        #         probs_centres_sirt = centre_sirt[b, ymin:ymax+1, xmin:xmax+1].reshape(-1)
+        #         k = min(5, probs_centres.numel())
+        #         k_sirt = min(5, probs_centres_sirt.numel())
 
-                vals, idxs = torch.topk(probs_centres, k=k)
-                vals_sirt, idxs_sirt = torch.topk(probs_centres_sirt, k=k_sirt)
+        #         vals, idxs = torch.topk(probs_centres, k=k)
+        #         vals_sirt, idxs_sirt = torch.topk(probs_centres_sirt, k=k_sirt)
 
-                crops_topk = torch.zeros(k, 1, 28, 28, device=y.device, dtype=x.dtype)
-                crops_topk_sirt = torch.zeros(k_sirt, 1, 28, 28, device=y.device, dtype=x.dtype)
+        #         crops_topk = torch.zeros(k, 1, 28, 28, device=y.device, dtype=x.dtype)
+        #         crops_topk_sirt = torch.zeros(k_sirt, 1, 28, 28, device=y.device, dtype=x.dtype)
 
-                for j, idx in enumerate(idxs):
-                    idx = idx.item()
-                    iy = idx // W_valid
-                    ix = idx % W_valid
+        #         for j, idx in enumerate(idxs):
+        #             idx = idx.item()
+        #             iy = idx // W_valid
+        #             ix = idx % W_valid
 
-                    cy = ymin + iy
-                    cx = xmin + ix
+        #             cy = ymin + iy
+        #             cx = xmin + ix
 
-                    crops_topk[j:j+1] = x_both[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-                    crops_topk_sirt[j:j+1] = x_sirt[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+        #             crops_topk[j:j+1] = x_both[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+        #             crops_topk_sirt[j:j+1] = x_sirt[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
 
-                logits = class_model(crops_topk)
-                probs_digits = torch.softmax(logits, dim=1)
+        #         logits = class_model(crops_topk)
+        #         probs_digits = torch.softmax(logits, dim=1)
 
-                weights = vals / vals.sum().clamp_min(1e-12)
-                map_digit[b] = (weights.unsqueeze(1) * probs_digits).sum(dim=0)
+        #         weights = vals / vals.sum().clamp_min(1e-12)
+        #         map_digit[b] = (weights.unsqueeze(1) * probs_digits).sum(dim=0)
 
-                logits_sirt = class_model(crops_topk_sirt)
-                probs_digits_sirt = torch.softmax(logits_sirt, dim=1)
+        #         logits_sirt = class_model(crops_topk_sirt)
+        #         probs_digits_sirt = torch.softmax(logits_sirt, dim=1)
 
-                weights_sirt = vals_sirt / vals_sirt.sum().clamp_min(1e-12)
-                map_digit_sirt[b] = (weights_sirt.unsqueeze(1) * probs_digits_sirt).sum(dim=0)
+        #         weights_sirt = vals_sirt / vals_sirt.sum().clamp_min(1e-12)
+        #         map_digit_sirt[b] = (weights_sirt.unsqueeze(1) * probs_digits_sirt).sum(dim=0)
 
 
-        digit = map_digit
-        digit_sirt = map_digit_sirt
-        centre = map_x
-        centre_sirt = map_x_sirt
+        # digit = map_digit
+        # digit_sirt = map_digit_sirt
+        # centre = map_x
+        # centre_sirt = map_x_sirt
 
         digit_prob_true = digit.gather(1, digit_true.unsqueeze(1)).squeeze(1)
         digit_nll = -torch.log(digit_prob_true.clamp_min(eps))
