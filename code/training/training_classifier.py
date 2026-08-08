@@ -21,12 +21,12 @@ random.seed(42)
 np.random.seed(42)
 
 # PARAMETERS
-model_name = "cnn_classifier_bigger"
+model_name = "cnn_classifier_clean1yrp"
 batch_size = 128
 epochs = 30
 lr= 1e-3
 weight_decay = 1e-4
-num_workers = 2
+num_workers = 1
 device= "cuda" 
 save_dir = "./checkpoints/classifier"
 os.makedirs(save_dir, exist_ok=True)

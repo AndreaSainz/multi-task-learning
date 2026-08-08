@@ -58,8 +58,8 @@ I = 10
 tol_dx = 1e-3
 patience_dx = 3
 alpha = 2e-1/(75.776649475097666)**2 #1/(liptchitz constant)^2. .  53.595951080322266
-beta1 = [1e-1, 1e-1]
-beta2 = [5e-2, 5e-2] #[5e-4, 5e-3]
+beta1 = [8e-2, 8e-2] #[1e-2, 1e-2]
+beta2 = [5e-2, 5e-2] #[5e-2, 5e-2] #[5e-4, 5e-3] 
 alpha_img = 0.01
 accelerator = Accelerator()
 device = accelerator.device
@@ -123,7 +123,7 @@ train_dataloader = DataLoader(
 ###################################################################### Logger #####################################################################
 # create logger for checkpoints
 log_dir = "logs"
-name = "60_angles_sigma_0.3"
+name = "60_angles_sigma_0.3_lines"
 
 os.makedirs(log_dir, exist_ok=True)
 handlers = [logging.StreamHandler()]
@@ -155,8 +155,8 @@ if accelerator.is_main_process:
 
 class_model = CNNClassifier()
 
-checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/classifier/classifier_best_finetunned.pt", map_location="cpu")
-class_model.load_state_dict(checkpoint)
+checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/classifier/cnn_classifier_clean1yrp_best.pt", map_location="cpu")
+class_model.load_state_dict(checkpoint) #["model"])
 
 class_model.eval() 
 for p in class_model.parameters():
@@ -495,7 +495,7 @@ def regularization_grad(crop_x, digit, mode, i, batch_id, t):
     return grad_crop
 
 
-def update_case(x, y, centre, digit, alpha, i, t, batch_id, mode):
+def update_case(x, y, centre, digit, alpha, i, t, batch_id, mode, centre_true):
     x, step_data = sirt_step(x, y, alpha)
 
     if mode == "none":
@@ -531,13 +531,18 @@ def update_case(x, y, centre, digit, alpha, i, t, batch_id, mode):
         sigma_data=sigma_data,
         #alpha = 1 + (10 - 1) * (i / (I - 1))
     )
-    
+    grad_task_crop = extract_crops(grad_task[0,0], centre_true)
+    if  batch_id == 0 and t==0: #i % 2 == 0 and t==0 and mode == "both": # and
+        plt.imshow(grad_task_crop.detach().cpu().numpy(), cmap="gray")
+        plt.colorbar()
+        plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_grad_crop_{name}.png"), dpi=300, bbox_inches="tight")
+        plt.close()
     x = (x - grad_task).clamp(0, 1).detach()
     return x, step_data
 
 ###################################################################### Multi-task function #####################################################################
 
-def model(y, batch_id, x_true, centre_true, digit_true):
+def model(y, x, batch_id, x_true, centre_true, digit_true):
     images_SIRT = []
     images_class = []
     images_deno = []
@@ -560,18 +565,20 @@ def model(y, batch_id, x_true, centre_true, digit_true):
 
 
     # RECONSTRUCTION
-    x = torch.zeros(B, 1, H, W, device=y.device)
+    device = y.device
+    x = x.to(device)
+    #x = torch.zeros(B, 1, H, W, device=y.device)
     
 
     # if accelerator.is_main_process and batch_id == 0:
     #     dx_norm_mean = torch.zeros(T_ini, device=y.device) 
     #     dx_norm_b0 = torch.zeros(T_ini, device=y.device)  
 
-    for t in range(T_ini):
-        x_prev = x
-        x , step_data = sirt_step(x, y, alpha)
-        if accelerator.is_main_process and batch_id ==0 and t % 5 == 0:
-            logger.info(f"Gradient descent step -1_{t}: {step_data.flatten(1).norm(dim=1).mean().item()}")
+    #for t in range(T_ini):
+        # x_prev = x
+        # x , step_data = sirt_step(x, y, alpha)
+        # if accelerator.is_main_process and batch_id ==0 and t % 5 == 0:
+        #     logger.info(f"Gradient descent step -1_{t}: {step_data.flatten(1).norm(dim=1).mean().item()}")
 
         # debugging || x^{k+1} -x^k||
         # if accelerator.is_main_process and batch_id == 0:
@@ -663,17 +670,18 @@ def model(y, batch_id, x_true, centre_true, digit_true):
 
     #digit = torch.full((B, 10), 0.1, device=y.device)
 
-    # centre = torch.zeros((B, H, W), device=x.device)
+    centre = torch.zeros((B, H, W), device=x.device)
+    centre_true = centre_true.to(x.device)
     # centre_true = centre_true.to(x.device)
-    # y = centre_true[:, 0].long()
-    # x = centre_true[:, 1].long()
+    y_ce = centre_true[:, 0].long()
+    x_ce = centre_true[:, 1].long()
 
-    # centre[torch.arange(B, device=x.device), y, x] = 1.0
+    centre[torch.arange(B, device=x.device), y_ce, x_ce] = 1.0
 
     # area = (ymax - ymin + 1) * (xmax - xmin + 1)
     # centre[:, ymin:ymax+1, xmin:xmax+1] = 1.0 / area
-    centre_true = centre_true.to(x.device)
-    centre = centre_true.clone()
+    
+    #centre = centre_true.clone()
     centre_sirt = centre.clone()
     eps = 1e-12
 
@@ -794,8 +802,8 @@ def model(y, batch_id, x_true, centre_true, digit_true):
         
         # reconstruction
         for t in range(T):
-            x_prev_both = x_both 
-            x_both , step_data = update_case(x_both, y, centre_true, digit_true, alpha, i, t, batch_id, "both")
+            #x_prev_both = x_both 
+            #x_both , step_data = update_case(x_both, y, centre, digit, alpha, i, t, batch_id, "both")
 
         
             # debugging || x^{k+1} -x^k||
@@ -809,7 +817,7 @@ def model(y, batch_id, x_true, centre_true, digit_true):
 
             #only SIRT
             x_sirt_prev = x_sirt
-            x_sirt , _ = update_case(x_sirt, y, centre_true, digit_true, alpha, i, t, batch_id, "none")
+            x_sirt , _ = update_case(x_sirt, y, centre, digit, alpha, i, t, batch_id, "none")
 
             # debugging || x^{k+1} -x^k||
             # if accelerator.is_main_process and batch_id == 0 and i % 5 == 0:
@@ -819,11 +827,11 @@ def model(y, batch_id, x_true, centre_true, digit_true):
 
 
             #only classifier
-            x_class , _ = update_case(x_class, y, centre_true, digit_true, alpha, i, t, batch_id, "class")
+            x_class , _ = update_case(x_class, y, centre, digit, alpha, i, t, batch_id, "class")
 
 
             #only denoiser
-            x_deno , _ = update_case(x_deno, y, centre_true, digit_true, alpha, i, t, batch_id, "deno")
+            x_deno , _ = update_case(x_deno, y, centre, digit, alpha, i, t, batch_id, "deno")
 
         crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
         crop_x_both = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
@@ -1079,7 +1087,7 @@ def model(y, batch_id, x_true, centre_true, digit_true):
         # digits_sirt_all.append(digit_sirt.detach().cpu())
 
         del crop_x, crop_x_both, crop_x_sirt, crop_x_class, crop_x_deno
-        del map_x, logits, map_digit
+        #del map_x, logits, map_digit
         torch.cuda.empty_cache()
 
     return images, images_SIRT, images_class, images_deno, centers, digits, centers_sirt_all, digits_sirt_all, psnr_history, ssim_history, digit_acc_history, centre_mse_history
@@ -1135,39 +1143,39 @@ for batch_id, batch in enumerate(train_dataloader):
 
 
    
-    # x = torch.zeros(B, 1, 100, 100, device=ground_truth_1.device)
+    x = torch.zeros(B, 1, 100, 100, device=ground_truth_1.device)
 
     
-    # for b in range(B):
-    #     cy = int(ground_truth_3[b, 0].item())
-    #     cx = int(ground_truth_3[b, 1].item())
-    #     crop = ground_truth_1[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+    for b in range(B):
+        cy = int(ground_truth_3[b, 0].item())
+        cx = int(ground_truth_3[b, 1].item())
+        crop = ground_truth_1[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
 
-    #     # sigma aleatorio entre 0.1 y 0.3
-    #     sigma = torch.empty(1, device=crop.device).uniform_(0.1, 0.3)
-    #     crop = crop + torch.randn_like(crop) * sigma
+        # # sigma aleatorio entre 0.1 y 0.3
+        # sigma = torch.empty(1, device=crop.device).uniform_(0.1, 0.3)
+        # crop = crop + torch.randn_like(crop) * sigma
  
-    #     # # columnas centrales
-    #     crop[:, :, :, 12:15] = 0.0
+        # # columnas centrales
+        crop[:, :, :, 12:15] = 0.0
 
-    #     x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
+        x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
 
-    #     # # máscara de píxeles no cero
-    #     # nonzero_mask = crop != 0
+        # # máscara de píxeles no cero
+        # nonzero_mask = crop != 0
 
-    #     # # índices de esos píxeles
-    #     # indices = nonzero_mask.nonzero(as_tuple=False)
+        # # índices de esos píxeles
+        # indices = nonzero_mask.nonzero(as_tuple=False)
 
-    #     # # si hay suficientes píxeles no cero
-    #     # if indices.shape[0] >= 5:
-    #     #     # elegimos k aleatorios
-    #     #     selected = indices[torch.randperm(indices.shape[0])[:30]]
+        # # si hay suficientes píxeles no cero
+        # if indices.shape[0] >= 5:
+        #     # elegimos k aleatorios
+        #     selected = indices[torch.randperm(indices.shape[0])[:30]]
 
-    #     #     # los ponemos a 0
-    #     #     for idx in selected:
-    #     #         crop[idx[0], idx[1], idx[2], idx[3]] = 0.0
+        #     # los ponemos a 0
+        #     for idx in selected:
+        #         crop[idx[0], idx[1], idx[2], idx[3]] = 0.0
 
-    #     # x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
+        # x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
     
  
     if accelerator.is_main_process and batch_id == 0:
@@ -1175,7 +1183,7 @@ for batch_id, batch in enumerate(train_dataloader):
         logger.info(f"original centre: {ground_truth_3}")
 
     
-    images, images_SIRT, images_class, images_deno, centers, digits, centers_sirt, digits_sirt, psnr_history, ssim_history, digit_acc_history, centre_mse_history = model(input_data, batch_id, ground_truth_1, ground_truth_3, ground_truth_2)
+    images, images_SIRT, images_class, images_deno, centers, digits, centers_sirt, digits_sirt, psnr_history, ssim_history, digit_acc_history, centre_mse_history = model(input_data, x, batch_id, ground_truth_1, ground_truth_3, ground_truth_2)
     
     if accelerator.is_main_process and batch_id ==0: 
         for b in range(B):
@@ -1296,59 +1304,59 @@ for batch_id, batch in enumerate(train_dataloader):
 
 
         
-            digit_prob_vals = [d["digit_prob_true"][b].mean().item() for d in digit_acc_history]
-            digit_prob_vals_sirt = [d["digit_prob_true_sirt"][b].mean().item() for d in digit_acc_history]
+            # digit_prob_vals = [d["digit_prob_true"][b].mean().item() for d in digit_acc_history]
+            # digit_prob_vals_sirt = [d["digit_prob_true_sirt"][b].mean().item() for d in digit_acc_history]
 
-            plt.figure()
-            plt.plot(I_vals, digit_prob_vals, marker="o", label="Mean Digit prob (model)")
-            plt.plot(I_vals, digit_prob_vals_sirt, marker="o", label="Mean Digit prob (SIRT)")
-            plt.xlabel("I")
-            plt.ylabel("Probability")
-            plt.ylim(0.0, 1.0)
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_digit_prob_curve_{name}.png"), dpi=300, bbox_inches="tight")
-            plt.close()
+            # plt.figure()
+            # plt.plot(I_vals, digit_prob_vals, marker="o", label="Mean Digit prob (model)")
+            # plt.plot(I_vals, digit_prob_vals_sirt, marker="o", label="Mean Digit prob (SIRT)")
+            # plt.xlabel("I")
+            # plt.ylabel("Probability")
+            # plt.ylim(0.0, 1.0)
+            # plt.legend()
+            # plt.grid(True)
+            # plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_digit_prob_curve_{name}.png"), dpi=300, bbox_inches="tight")
+            # plt.close()
 
-            digit_nll_vals = [d["digit_nll"][b].mean().item() for d in digit_acc_history]
-            digit_nll_vals_sirt = [d["digit_nll_sirt"][b].mean().item() for d in digit_acc_history]
+            # digit_nll_vals = [d["digit_nll"][b].mean().item() for d in digit_acc_history]
+            # digit_nll_vals_sirt = [d["digit_nll_sirt"][b].mean().item() for d in digit_acc_history]
 
-            plt.figure()
-            plt.plot(I_vals, digit_nll_vals, marker="o", label="Mean Digit NLL (model)")
-            plt.plot(I_vals, digit_nll_vals_sirt, marker="o", label="Mean Digit NLL (SIRT)")
-            plt.xlabel("I")
-            plt.ylabel("-log p(true)")
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_digit_nll_curve_{name}.png"), dpi=300, bbox_inches="tight")
-            plt.close()
+            # plt.figure()
+            # plt.plot(I_vals, digit_nll_vals, marker="o", label="Mean Digit NLL (model)")
+            # plt.plot(I_vals, digit_nll_vals_sirt, marker="o", label="Mean Digit NLL (SIRT)")
+            # plt.xlabel("I")
+            # plt.ylabel("-log p(true)")
+            # plt.legend()
+            # plt.grid(True)
+            # plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_digit_nll_curve_{name}.png"), dpi=300, bbox_inches="tight")
+            # plt.close()
 
-            digit_margin_vals = [d["digit_entropy"][b].mean().item() for d in digit_acc_history]
-            digit_margin_vals_sirt = [d["digit_entropy_sirt"][b].mean().item() for d in digit_acc_history]
+            # digit_margin_vals = [d["digit_entropy"][b].mean().item() for d in digit_acc_history]
+            # digit_margin_vals_sirt = [d["digit_entropy_sirt"][b].mean().item() for d in digit_acc_history]
 
-            plt.figure()
-            plt.plot(I_vals, digit_margin_vals, marker="o", label="Mean Digit entropy (model)")
-            plt.plot(I_vals, digit_margin_vals_sirt, marker="o", label="Mean Digit entropy (SIRT)")
-            plt.xlabel("I")
-            plt.ylabel("Entropy")
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_digit_entropy_curve_{name}.png"), dpi=300, bbox_inches="tight")
-            plt.close()
+            # plt.figure()
+            # plt.plot(I_vals, digit_margin_vals, marker="o", label="Mean Digit entropy (model)")
+            # plt.plot(I_vals, digit_margin_vals_sirt, marker="o", label="Mean Digit entropy (SIRT)")
+            # plt.xlabel("I")
+            # plt.ylabel("Entropy")
+            # plt.legend()
+            # plt.grid(True)
+            # plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_digit_entropy_curve_{name}.png"), dpi=300, bbox_inches="tight")
+            # plt.close()
 
 
-            centre_w1_vals = [d["centre_w1"][b].mean().item() for d in centre_mse_history]
-            centre_w1_vals_sirt = [d["centre_w1_sirt"][b].mean().item() for d in centre_mse_history]
+            # centre_w1_vals = [d["centre_w1"][b].mean().item() for d in centre_mse_history]
+            # centre_w1_vals_sirt = [d["centre_w1_sirt"][b].mean().item() for d in centre_mse_history]
 
-            plt.figure()
-            plt.plot(I_vals, centre_w1_vals, marker="o", label="Mean Centre W1 (model)")
-            plt.plot(I_vals, centre_w1_vals_sirt, marker="o", label="Mean Centre W1 (SIRT)")
-            plt.xlabel("I")
-            plt.ylabel("Wasserstein-1 (pixels)")
-            plt.legend()
-            plt.grid(True)
-            plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_centre_w1_curve_{name}.png"), dpi=300, bbox_inches="tight")
-            plt.close()
+            # plt.figure()
+            # plt.plot(I_vals, centre_w1_vals, marker="o", label="Mean Centre W1 (model)")
+            # plt.plot(I_vals, centre_w1_vals_sirt, marker="o", label="Mean Centre W1 (SIRT)")
+            # plt.xlabel("I")
+            # plt.ylabel("Wasserstein-1 (pixels)")
+            # plt.legend()
+            # plt.grid(True)
+            # plt.savefig(os.path.join(results_dir, f"{batch_id}_sample{b}_centre_w1_curve_{name}.png"), dpi=300, bbox_inches="tight")
+            # plt.close()
         
     
             gt_images.append(ground_truth_1[b].detach().cpu())
@@ -1360,23 +1368,23 @@ for batch_id, batch in enumerate(train_dataloader):
             clas_images.append(images_class[-1][b].detach().cpu())
             deno_images.append(images_deno[-1][b].detach().cpu())
 
-            both_digits.append(digits[-1][b].detach().cpu())
-            sirt_digits.append(digits_sirt[-1][b].detach().cpu())
+            # both_digits.append(digits[-1][b].detach().cpu())
+            # sirt_digits.append(digits_sirt[-1][b].detach().cpu())
 
-            both_centers.append(centers[-1][b].detach().cpu())
-            sirt_centers.append(centers_sirt[-1][b].detach().cpu())
+            # both_centers.append(centers[-1][b].detach().cpu())
+            # sirt_centers.append(centers_sirt[-1][b].detach().cpu())
 
-            both_digit_prob_true.append([d["digit_prob_true"][b].item() for d in digit_acc_history])
-            sirt_digit_prob_true.append([d["digit_prob_true_sirt"][b].item() for d in digit_acc_history])
+            # both_digit_prob_true.append([d["digit_prob_true"][b].item() for d in digit_acc_history])
+            # sirt_digit_prob_true.append([d["digit_prob_true_sirt"][b].item() for d in digit_acc_history])
 
-            both_digit_nll.append([d["digit_nll"][b].item() for d in digit_acc_history])
-            sirt_digit_nll.append([d["digit_nll_sirt"][b].item() for d in digit_acc_history])
+            # both_digit_nll.append([d["digit_nll"][b].item() for d in digit_acc_history])
+            # sirt_digit_nll.append([d["digit_nll_sirt"][b].item() for d in digit_acc_history])
 
-            both_digit_entropy.append([d["digit_entropy"][b].item() for d in digit_acc_history])
-            sirt_digit_entropy.append([d["digit_entropy_sirt"][b].item() for d in digit_acc_history])
+            # both_digit_entropy.append([d["digit_entropy"][b].item() for d in digit_acc_history])
+            # sirt_digit_entropy.append([d["digit_entropy_sirt"][b].item() for d in digit_acc_history])
 
-            both_centre_w1.append([d["centre_w1"][b].item() for d in centre_mse_history])
-            sirt_centre_w1.append([d["centre_w1_sirt"][b].item() for d in centre_mse_history])
+            # both_centre_w1.append([d["centre_w1"][b].item() for d in centre_mse_history])
+            # sirt_centre_w1.append([d["centre_w1_sirt"][b].item() for d in centre_mse_history])
 
             both_psnr.append([d["psnr_x"][b].item() for d in psnr_history])
             sirt_psnr.append([d["psnr_x_sirt"][b].item() for d in psnr_history])
@@ -1405,8 +1413,8 @@ results = {
     "sigma_data": sigma_data,
     "angles": angles,
     "gt_images": gt_images,
-    "gt_digits": gt_digits,
-    "gt_centers": gt_centers,
+    # "gt_digits": gt_digits,
+    # "gt_centers": gt_centers,
     "both_images": both_images,      # [batch][iter][B,1,H,W]
     "sirt_images": sirt_images,
     "clas_images": clas_images,
@@ -1427,18 +1435,18 @@ results = {
     "both_ssim_crop": both_ssim_crop,
     "clas_ssim_crop": clas_ssim_crop,
     "deno_ssim_crop": deno_ssim_crop,
-    "both_digits": both_digits,
-    "both_centers": both_centers,
-    "sirt_digits": sirt_digits,
-    "sirt_centers": sirt_centers,
-    "both_digit_prob_true": both_digit_prob_true,
-    "sirt_digit_prob_true": sirt_digit_prob_true,
-    "both_digit_nll": both_digit_nll,
-    "sirt_digit_nll": sirt_digit_nll,
-    "both_digit_entropy": both_digit_entropy,
-    "sirt_digit_entropy": sirt_digit_entropy,
-    "both_centre_w1": both_centre_w1,
-    "sirt_centre_w1": sirt_centre_w1
+    # "both_digits": both_digits,
+    # "both_centers": both_centers,
+    # "sirt_digits": sirt_digits,
+    # "sirt_centers": sirt_centers,
+    # "both_digit_prob_true": both_digit_prob_true,
+    # "sirt_digit_prob_true": sirt_digit_prob_true,
+    # "both_digit_nll": both_digit_nll,
+    # "sirt_digit_nll": sirt_digit_nll,
+    # "both_digit_entropy": both_digit_entropy,
+    # "sirt_digit_entropy": sirt_digit_entropy,
+    # "both_centre_w1": both_centre_w1,
+    # "sirt_centre_w1": sirt_centre_w1
     }
 
 

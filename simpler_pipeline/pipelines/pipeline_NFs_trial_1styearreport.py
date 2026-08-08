@@ -47,7 +47,7 @@ I = 10
 tol_dx = 1e-3
 patience_dx = 3
 alpha = 2e-1/(75.77664947509766)**2 #1/(liptchitz constant)^2 2e-1/(53.595951080322266)**2 #
-beta = 5e-5
+beta = 5e-9
 n_train = 10
 batch_size = 1
 save_batch_id = 0
@@ -738,39 +738,39 @@ for batch_id, batch in enumerate(train_dataloader):
 
 
    
-    # x = torch.zeros(B, 1, 100, 100, device=ground_truth_1.device)
+    x = torch.zeros(B, 1, 100, 100, device=ground_truth_1.device)
 
     
-    # for b in range(B):
-    #     cy = int(ground_truth_3[b, 0].item())
-    #     cx = int(ground_truth_3[b, 1].item())
-    #     crop = ground_truth_1[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+    for b in range(B):
+        cy = int(ground_truth_3[b, 0].item())
+        cx = int(ground_truth_3[b, 1].item())
+        crop = ground_truth_1[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
 
-    #     # sigma aleatorio entre 0.1 y 0.3
-    #     sigma = torch.empty(1, device=crop.device).uniform_(0.1, 0.3)
-    #     crop = crop + torch.randn_like(crop) * sigma
+        # # sigma aleatorio entre 0.1 y 0.3
+        # sigma = torch.empty(1, device=crop.device).uniform_(0.1, 0.3)
+        # crop = crop + torch.randn_like(crop) * sigma
  
-    #     # columnas centrales
-    #     crop[:, :, :, 12:15] = 0.0
+        # columnas centrales
+        crop[:, :, :, 12:15] = 0.0
 
-    #     x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
+        x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
 
-    #     # # máscara de píxeles no cero
-    #     # nonzero_mask = crop != 0
+        # # máscara de píxeles no cero
+        # nonzero_mask = crop != 0
 
-    #     # # índices de esos píxeles
-    #     # indices = nonzero_mask.nonzero(as_tuple=False)
+        # # índices de esos píxeles
+        # indices = nonzero_mask.nonzero(as_tuple=False)
 
-    #     # # si hay suficientes píxeles no cero
-    #     # if indices.shape[0] >= 5:
-    #     #     # elegimos k aleatorios
-    #     #     selected = indices[torch.randperm(indices.shape[0])[:30]]
+        # # si hay suficientes píxeles no cero
+        # if indices.shape[0] >= 5:
+        #     # elegimos k aleatorios
+        #     selected = indices[torch.randperm(indices.shape[0])[:30]]
 
-    #     #     # los ponemos a 0
-    #     #     for idx in selected:
-    #     #         crop[idx[0], idx[1], idx[2], idx[3]] = 0.0
+        #     # los ponemos a 0
+        #     for idx in selected:
+        #         crop[idx[0], idx[1], idx[2], idx[3]] = 0.0
 
-    #     # x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
+        # x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
     
  
     if accelerator.is_main_process and batch_id == 0 :

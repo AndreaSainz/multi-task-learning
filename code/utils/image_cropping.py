@@ -18,10 +18,10 @@ def extract_crops(x, centre):
 def insert_crop_grad_in_image(x, grad_crop, centre, fill_mode="scaled_x"):
     grad_F = torch.zeros_like(x)
 
-    if fill_mode == "scaled_x":
-        x_scaled = x.clone()
-        scale = grad_crop.norm() / (x_scaled.norm() + 1e-8)
-        grad_F = 5 * x_scaled * scale
+    # if fill_mode == "scaled_x":
+    #     x_scaled = x.clone()
+    #     scale = grad_crop.norm() / (x_scaled.norm() + 1e-8)
+    #     grad_F = 5 * x_scaled * scale
 
     for b in range(x.shape[0]):
         cy = int(centre[b, 0].item())
