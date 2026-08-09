@@ -10,7 +10,11 @@ from code.models.score_unet import ContextUnet, ddpm_schedules
 from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
 from code.utils.gradients import update_case, score_centers_difussion_model
 from code.utils.image_cropping import extract_crops, insert_crop_grad_in_image
+from code.utils.plots import images_plots, psnr_plots, ssim_plots
+from code.utils.logger import setup_logger
+from code.models.normalizing_flow import normalizing_flow_model
 from code.ct_recon.SIRT import sirt_step
+from code.ct_recon.operators import ct_operator
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -22,8 +26,7 @@ import normflows as nf
 from collections import Counter
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Subset
-import torch, gc
-
+import gc
 
 
 
@@ -32,10 +35,13 @@ import torch, gc
 ### data
 accelerator = Accelerator()
 device = accelerator.device
-seed = 29072000
+n_train = 10
+batch_size = 1
+save_batch_id = 0
 H = 100
 W = 100
 num_angles = 60
+angle_range = [0, np.pi]
 i_0 = 10**5
 sigma_data = 0.3
 
@@ -46,103 +52,21 @@ R = 70
 I = 10
 tol_dx = 1e-3
 patience_dx = 3
-alpha = 2e-1/(75.77664947509766)**2 #1/(liptchitz constant)^2 2e-1/(53.595951080322266)**2 #
+alpha = 2e-1/(75.77664947509766)**2            #1/(liptchitz constant)^2: 2e-1/(53.595951080322266)**2 
 beta = 5e-9
-n_train = 10
-batch_size = 1
-save_batch_id = 0
 topk_digits = 5184
+
+# saving directory
 results_dir = "simpler_pipeline/Results/ExperimentsNF/Experiments4/60_angles_sigma_0.3"
 
-
-###################################################################### Data #####################################################################
-
-# define CT geometry
-vg = ts.volume(shape=(1,H,W))                                 # Volume
-angles = np.linspace(0, np.pi, num_angles, endpoint=True)     # Angles
-pg = ts.parallel(angles=angles, shape=(1, H))                 # Parallel beam structure
-A = ts.operator(vg,pg)
-
-
-A_torch  = to_autograd(A,   is_2d=True, num_extra_dims=2)
-AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
-
-
-# Import data
-data = MnistDataset(training = True,
-                testing= False, 
-                A = A, 
-                dimension = (H,W), 
-                num_angles = num_angles, 
-                sigma = sigma_data,
-                i_0 = i_0,
-                cut = False,
-                seed = seed,
-                max_len = None,
-                device = device)
-
-#for reproducibility
-g_split = torch.Generator()
-g_split.manual_seed(seed)
-labels = np.array([data[i]["label"] for i in range(len(data))])
-
-# Split estratificado
-train_idx, val_idx = train_test_split(
-    np.arange(len(data)),
-    train_size=n_train,
-    stratify=labels,
-    random_state=seed
-)
-
-train_data = Subset(data, train_idx)
-
-
-# create dataloader
-train_dataloader = DataLoader(
-    train_data,
-    batch_size=batch_size,
-    shuffle=True,
-    generator=g_split)
-
-
-###################################################################### Logger #####################################################################
-# create logger for checkpoints
-log_dir = "logs"
-name = "nfs_60_angles_sigma_0.3"
-os.makedirs(log_dir, exist_ok=True)
-
-handlers = [logging.StreamHandler()]
-if accelerator.is_main_process:
-    handlers.insert(0, logging.FileHandler(os.path.join(log_dir, f"{name}.log")))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=handlers
-)
-
-logger = logging.getLogger(__name__)
-
-
-
-#Check if the dataset is balanced
-labels_bal = torch.tensor([train_data[i]["label"] for i in range(len(train_data))])
-counts = torch.bincount(labels_bal, minlength=10)
-
-if accelerator.is_main_process:
-    logger.info("Balanced dataset label counts:")
-    for d in range(10):
-        logger.info(f"Digit {d}: {counts[d].item()}")
-
-
-###################################################################### Trained NF Model #####################################################################
-
-# Import trained mu(x_cropped|digit)
-# Define flows
-L = 2               #number of latent variables (z_l)
-K = 32              #how complex the invertible function is
+## seeds
+seed = 29072000
 torch.manual_seed(0)
 
+
+## model parameters (GLOW model)
+L = 2               #number of latent variables (z_l)
+K = 32              #how complex the invertible function is
 input_shape = (1, 28, 28)
 n_dims = np.prod(input_shape)
 channels = 1
@@ -151,32 +75,36 @@ split_mode = 'channel'
 scale = True
 num_classes = 10
 
-# Set up flows, distributions and merge operations
-q0 = []
-merges = []
-flows = []
-for i in range(L):
-    flows_ = []
-    for j in range(K):
-        flows_ += [nf.flows.GlowBlock(channels * 2 ** (L + 1 - i), hidden_channels,
-                                     split_mode=split_mode, scale=scale)]
-    flows_ += [nf.flows.Squeeze()]
-    flows += [flows_]
-    if i > 0:
-        merges += [nf.flows.Merge()]
-        latent_shape = (input_shape[0] * 2 ** (L - i), input_shape[1] // 2 ** (L - i), 
-                        input_shape[2] // 2 ** (L - i))
-    else:
-        latent_shape = (input_shape[0] * 2 ** (L + 1), input_shape[1] // 2 ** L, 
-                        input_shape[2] // 2 ** L)
-    q0 += [nf.distributions.ClassCondDiagGaussian(latent_shape, num_classes)]
 
-mu_model = nf.MultiscaleFlow(q0, flows, merges)
-mu_model = mu_model.to(device)
+###################################################################### Logger #####################################################################
+# create logger for checkpoints
+log_dir = "logs"
+name = "nfs_60_angles_sigma_0.3"
+os.makedirs(log_dir, exist_ok=True)
 
+logger = setup_logger(log_dir, name, accelerator = accelerator)
+
+
+###################################################################### Data #####################################################################
+
+# define CT geometry
+A = ct_operator(H, W, angle_range, num_angles, "parallel")
+A_torch  = to_autograd(A,   is_2d=True, num_extra_dims=2)
+AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
+
+
+# create pytorch training dataloader
+train_dataloader = import_data(True, False, n_train, None, A, num_angles, sigma_data, i_0, seed, logger, device)
+
+###################################################################### Trained NF Model #####################################################################
+
+mu_model = normalizing_flow_model(L,K,input_shape, channels, hidden_channels, split_mode, scale, num_classes)
+
+# Import trained mu(x_cropped|digit)
 checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/normalizing flow/glow_mnist_checkpoint_clean.pt", map_location=device)
 mu_model.load_state_dict(checkpoint["model_state_dict"])
 
+# model in evaluation mode, we don't want to train it
 mu_model.eval() 
 for p in mu_model.parameters():
    p.requires_grad_(False)
@@ -780,155 +708,23 @@ for batch_id, batch in enumerate(train_dataloader):
     #if 1 in ground_truth_2 :
     images, images_SIRT, centers, digits, centers_sirt, digits_sirt, psnr_history, ssim_history = model(input_data, batch_id, ground_truth_1, ground_truth_3, ground_truth_2)
     
+
     if accelerator.is_main_process and batch_id == 0 :
 
-        # take last image from the list
-        img = ground_truth_1[0,0].detach().cpu().numpy()
-        img_both = images[-1][0, 0].numpy()
-        img_sirt = images_SIRT[-1][0, 0].numpy()
+        #defining a dictorionary with the images
+        images_dict = {"SIRT only": images_SIRT, "SIRT + NF": images, "Ground Truth": ground_truth_1}
 
-        all_imgs = np.stack([img, img_sirt, img_both])
-        vmin = all_imgs.min()
-        vmax = all_imgs.max()
+        # images plot
+        images_plots(results_dir, name, batch_id, sample, images_dict)
 
-        fig, axes = plt.subplots(1, 3, figsize=(18, 4))
+        # PSNR plots 
+        psnr_plots(results_dir, name, batch_id, psnr_history)
 
-        im = axes[0].imshow(img_sirt, cmap="gray", vmin=vmin, vmax=vmax)
-        axes[0].set_title("SIRT only")
-        axes[0].axis("off")
+        # SSIM plots 
+        psnr_plots(results_dir, name, batch_id, ssim_history)
 
-        axes[1].imshow(img_both, cmap="gray", vmin=vmin, vmax=vmax)
-        axes[1].set_title("SIRT + score")
-        axes[1].axis("off")
+        
 
-        axes[2].imshow(img, cmap="gray", vmin=vmin, vmax=vmax)
-        axes[2].set_title("Ground Truth")
-        axes[2].axis("off")
-
-        # barra de color común
-        cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
-        fig.colorbar(im, cax=cbar_ax)
-
-        plt.tight_layout(rect=[0, 0, 0.9, 1])
-        plt.savefig(os.path.join(results_dir, f"{batch_id}_comparison_{name}.png"), dpi=300, bbox_inches="tight")
-        plt.close()
-
-
-        I_vals = [d["I"] for d in psnr_history]
-        psnr_x_vals = [d["psnr_x"].mean().item() for d in psnr_history]
-        psnr_x_sirt_vals = [d["psnr_x_sirt"].mean().item() for d in psnr_history]
-
-        plt.figure()
-        plt.plot(I_vals, psnr_x_vals, marker="o", label="Mean SCORE")
-        plt.plot(I_vals, psnr_x_sirt_vals, marker="o", label="Mean SIRT")
-        plt.xlabel("I")
-        plt.ylabel("PSNR (dB)")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(os.path.join(results_dir, f"{batch_id}_psnr_curve_{name}.png"), dpi=300, bbox_inches="tight")
-        plt.close()
-
-        I_vals = [d["I"] for d in psnr_history]
-        psnr_x_crop_vals = [d["psnr_x_crop"].mean().item() for d in psnr_history]
-        psnr_x_sirt_crop_vals = [d["psnr_x_sirt_crop"].mean().item() for d in psnr_history]
-
-
-        plt.figure()
-        plt.plot(I_vals, psnr_x_sirt_crop_vals, marker="o", label="Mean SIRT")
-        plt.plot(I_vals, psnr_x_crop_vals, marker="o", label="Mean SCORE")
-        plt.xlabel("I")
-        plt.ylabel("PSNR crop (dB)")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(os.path.join(results_dir, f"{batch_id}_psnr_crop_curve_{name}.png"), dpi=300, bbox_inches="tight")
-        plt.close()
-
-        I_vals = [d["I"] for d in ssim_history]
-        ssim_x_vals = [d["ssim_x"].mean().item() for d in ssim_history]
-        ssim_x_sirt_vals = [d["ssim_x_sirt"].mean().item() for d in ssim_history]
-
-        plt.figure()
-        plt.plot(I_vals, ssim_x_vals, marker="o", label="Mean SCORE")
-        plt.plot(I_vals, ssim_x_sirt_vals, marker="o", label="Mean SIRT")
-        plt.xlabel("I")
-        plt.ylabel("SSIM")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(os.path.join(results_dir, f"{batch_id}_ssim_curve_{name}.png"), dpi=300, bbox_inches="tight")
-        plt.close()
-
-        I_vals = [d["I"] for d in ssim_history]
-        ssim_x_crop_vals = [d["ssim_x_crop"].mean().item() for d in ssim_history]
-        ssim_x_sirt_crop_vals = [d["ssim_x_sirt_crop"].mean().item() for d in ssim_history]
-
-
-        plt.figure()
-        plt.plot(I_vals, ssim_x_sirt_crop_vals, marker="o", label="Mean SIRT")
-        plt.plot(I_vals, ssim_x_crop_vals, marker="o", label="Mean SCORE")
-        plt.xlabel("I")
-        plt.ylabel("SSIM crop ")
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(os.path.join(results_dir, f"{batch_id}_ssim_crop_curve_{name}.png"), dpi=300, bbox_inches="tight")
-        plt.close()
-
-    
-
-        # I_vals = [d["I"] for d in digit_acc_history]
-        # digit_prob_vals = [d["digit_prob_true"].mean().item() for d in digit_acc_history]
-        # digit_prob_vals_sirt = [d["digit_prob_true_sirt"].mean().item() for d in digit_acc_history]
-
-        # plt.figure()
-        # plt.plot(I_vals, digit_prob_vals, marker="o", label="Mean Digit prob (SCORE)")
-        # plt.plot(I_vals, digit_prob_vals_sirt, marker="o", label="Mean Digit prob (SIRT)")
-        # plt.xlabel("I")
-        # plt.ylabel("Probability")
-        # plt.ylim(0.0, 1.0)
-        # plt.legend()
-        # plt.grid(True)
-        # plt.savefig(os.path.join(results_dir, f"{batch_id}_digit_prob_curve_{name}.png"), dpi=300, bbox_inches="tight")
-        # plt.close()
-
-        # digit_nll_vals = [d["digit_nll"].mean().item() for d in digit_acc_history]
-        # digit_nll_vals_sirt = [d["digit_nll_sirt"].mean().item() for d in digit_acc_history]
-
-        # plt.figure()
-        # plt.plot(I_vals, digit_nll_vals, marker="o", label="Mean Digit NLL (SCORE)")
-        # plt.plot(I_vals, digit_nll_vals_sirt, marker="o", label="Mean Digit NLL (SIRT)")
-        # plt.xlabel("I")
-        # plt.ylabel("-log p(true)")
-        # plt.legend()
-        # plt.grid(True)
-        # plt.savefig(os.path.join(results_dir, f"{batch_id}_digit_nll_curve_{name}.png"), dpi=300, bbox_inches="tight")
-        # plt.close()
-
-        # digit_margin_vals = [d["digit_entropy"].mean().item() for d in digit_acc_history]
-        # digit_margin_vals_sirt = [d["digit_entropy_sirt"].mean().item() for d in digit_acc_history]
-
-        # plt.figure()
-        # plt.plot(I_vals, digit_margin_vals, marker="o", label="Mean Digit entropy (SCORE)")
-        # plt.plot(I_vals, digit_margin_vals_sirt, marker="o", label="Mean Digit entropy (SIRT)")
-        # plt.xlabel("I")
-        # plt.ylabel("Entropy")
-        # plt.legend()
-        # plt.grid(True)
-        # plt.savefig(os.path.join(results_dir, f"{batch_id}_digit_entropy_curve_{name}.png"), dpi=300, bbox_inches="tight")
-        # plt.close()
-
-
-        # I_vals = [d["I"] for d in centre_mse_history]
-        # centre_w1_vals = [d["centre_w1"].mean().item() for d in centre_mse_history]
-        # centre_w1_vals_sirt = [d["centre_w1_sirt"].mean().item() for d in centre_mse_history]
-
-        # plt.figure()
-        # plt.plot(I_vals, centre_w1_vals, marker="o", label="Mean Centre W1 (SCORE)")
-        # plt.plot(I_vals, centre_w1_vals_sirt, marker="o", label="Mean Centre W1 (SIRT)")
-        # plt.xlabel("I")
-        # plt.ylabel("Wasserstein-1 (pixels)")
-        # plt.legend()
-        # plt.grid(True)
-        # plt.savefig(os.path.join(results_dir, f"{batch_id}_centre_w1_curve_{name}.png"), dpi=300, bbox_inches="tight")
-        # plt.close()
 
     for b in range(B):
         gt_images.append(ground_truth_1.detach().cpu())
