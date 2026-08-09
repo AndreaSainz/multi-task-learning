@@ -111,27 +111,7 @@ for p in mu_model.parameters():
 
 
 ###################################################################### Multi-task function #####################################################################
-def regularization_grad(crop_x, digit, i, batch_id, r):
-    idx = 0 if i == 0 else 1
-    B = crop_x.shape[0]
-    
 
-    crop_req = crop_x.detach().clone().requires_grad_(True)
-
-    log_mu = mu_model(crop_req, digit).view(B, 1) 
-
-    F =  (sigma_data**2) * log_mu.sum()
-
-    grad_F = torch.autograd.grad(F, crop_req, create_graph=False)[0]
-
-    step_F = beta * grad_F
-
-    step_F = step_F.detach()
-
-    if accelerator.is_main_process:
-        logger.info(f"Gradient descent step {batch_id}_{i}_{r}: {-step_F.flatten(1).norm(dim=1).mean().item()}")
-
-    return step_F
 
 def model(y, batch_id, x_true, centre_true, digit_true):
     images_SIRT = []

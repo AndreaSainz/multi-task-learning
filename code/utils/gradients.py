@@ -11,22 +11,366 @@ from code.ct_recon.SIRT import sirt_step
 from code.utils.image_cropping import extract_crops, insert_crop_grad_in_image
 
 
-def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, i, r, batch_id, mode, regularization_grad, results_dir, name):
+
+def nfs_grad(crop_x, digit, mu_model):
+    """
+    Compute the gradient of the log-density predicted by a normalizing flow
+    model with respect to the input crop.
+
+    Parameters
+    ----------
+        crop_x : torch.Tensor
+            Batch of input image crops with shape (B, 1, H, W).
+
+        digit : torch.Tensor
+            Tensor containing the digit labels corresponding to each crop.
+
+        mu_model : torch.nn.Module
+            Normalizing flow model that predicts the log-density of the input
+            crop conditioned on the corresponding digit.
+
+    Returns
+    -------
+    torch.Tensor
+        Gradient of the summed log-density with respect to crop_x, with the
+        same shape as crop_x.
+
+    Notes
+    -----
+    The input crop is detached from the original computation graph before
+    computing the gradient. The resulting gradient is also detached from
+    the graph before being returned.
+    """
+
+
+    B = crop_x.shape[0]
+    
+    crop_req = crop_x.detach().clone().requires_grad_(True)
+
+    log_mu = mu_model(crop_req, digit).view(B, 1) 
+
+    F =  log_mu.sum()
+
+    grad_F = torch.autograd.grad(F, crop_req, create_graph=False)[0]
+
+    step_F = grad_F.detach()
+
+    return step_F
+
+
+def cdm_grad(crop_x, digit, t_input, context_mask, fixed_noise, sqrtab, sqrtmab):
+    """
+    Compute the score-based gradient of a conditional diffusion model
+    with respect to the input crop.
+
+    Parameters
+    ----------
+        crop_x : torch.Tensor
+            Batch of input image crops with shape (B, 1, H, W).
+
+        digit : torch.Tensor
+            Tensor containing the digit labels corresponding to each crop.
+
+        t_input : torch.Tensor
+            Diffusion timestep input used to condition the score model.
+
+        context_mask : torch.Tensor
+            Mask controlling the conditioning information provided to the score
+            model.
+
+        fixed_noise : torch.Tensor
+            Fixed Gaussian noise used to construct the noisy diffusion sample.
+
+        sqrtab : torch.Tensor
+            Square root of the cumulative product of diffusion coefficients,
+            indexed by the diffusion timestep.
+
+        sqrtmab : torch.Tensor
+            Square root of one minus the cumulative product of diffusion
+            coefficients, indexed by the diffusion timestep.
+
+    Returns
+    -------
+    torch.Tensor
+        Score-based gradient tensor with the same shape as crop_x.
+
+    Notes
+    -----
+    The noisy sample x_t is constructed from crop_x and fixed_noise using
+    the diffusion coefficients. The predicted noise is obtained from the
+    score model without tracking gradients. The score is then converted
+    into a gradient with respect to the crop.
+    """
+    
+    B = crop_x.shape[0]
+    x_t = (
+        sqrtab[t].view(B, 1, 1, 1) * crop_x
+        + sqrtmab[t].view(B, 1, 1, 1) * fixed_noise
+    )
+    with torch.no_grad():
+        eps_hat = score_model(crop_x, digit, t_input, context_mask)
+    score = - eps_hat / sqrtmab[t].view(B, 1, 1, 1)
+
+    grad_crop = - score
+
+    return grad_crop
+
+
+def bayes_grad(crop_x, digit, mode, i, batch_id, gamma, class_model, den_model):
+    """
+    Compute a Bayesian gradient based on classification and/or denoising
+    objectives.
+
+    Parameters
+    ----------
+        crop_x : torch.Tensor
+            Batch of input image crops with shape (B, 1, H, W).
+
+        digit : torch.Tensor
+            Tensor containing the target digit labels corresponding to each crop.
+
+        mode : str
+            Determines which gradient components are included.
+
+            - "both" : use both the classification and denoising gradients.
+            - "class" : use only the classification gradient.
+            - "deno" : use only the denoising gradient.
+
+        i : int
+            Current iteration index.
+
+        batch_id : int
+            Index identifying the current batch.
+
+        gamma : torch.Tensor or array-like
+            Weighting coefficients applied to the classification and denoising
+            gradients. gamma[0] weights the classification component and
+            gamma[1] weights the denoising component.
+
+        class_model : torch.nn.Module
+            Classification model used to compute the gradient of the log
+            probability assigned to the target digit.
+
+        den_model : torch.nn.Module
+            Denoising model used to compute the denoising gradient.
+
+    Returns
+    -------
+    torch.Tensor
+        Combined gradient tensor with the same shape as crop_x.
+
+    Notes
+    -----
+    The classification gradient is computed from the log-probability of the
+    target digit after applying a log-softmax to the classifier logits.
+
+    The denoising gradient is defined as the difference between the
+    denoising model output and the input crop.
+
+    The selected gradient components are combined using the coefficients
+    specified by gamma and negated before being returned.
+    """
+
+
+    grad_classi = 0.0
+    grad_deno = 0.0
+
+    if mode in ["both", "class"]:
+        logits = class_model(crop_x)
+        log_probs = torch.log_softmax(logits, dim=1)
+        classi = log_probs.gather(1, digit.unsqueeze(1)).squeeze(1)
+        grad_classi = torch.autograd.grad(classi.sum(), crop_x, create_graph=False)[0]
+
+    if mode in ["both", "deno"]:
+        deno = den_model(crop_x)
+        grad_deno = deno - crop_x
+
+
+    if mode == "both":
+        grad_crop = - (gamma[0] * grad_classi + gamma[1] * grad_deno)
+    elif mode == "class":
+        grad_crop = - (gamma[0] * grad_classi)
+    elif mode == "deno":
+        grad_crop = - (gamma[1] * grad_deno)
+
+    return grad_crop
+
+
+
+def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data, mode, i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters):
+
+    """
+    Perform one reconstruction update consisting of a SIRT step followed,
+    optionally, by a regularization gradient step.
+
+    Parameters
+    ----------
+        x : torch.Tensor
+            Batch of current image reconstructions with shape (B, 1, H, W).
+
+        y : torch.Tensor
+            Batch of measured projection data used by the SIRT reconstruction
+            step.
+
+        A_torch : torch.Tensor
+            Forward projection operator used to compute the simulated projection
+            data from the current reconstruction.
+
+        AT_torch : torch.Tensor
+            Adjoint or backprojection operator used in the SIRT update.
+
+        centre : torch.Tensor
+            Tensor containing the center coordinates of each image with shape
+            (B, 2). For each sample, centre[b, 0] corresponds to the vertical
+            (y) coordinate and centre[b, 1] corresponds to the horizontal
+            (x) coordinate.
+
+        digit : torch.Tensor
+            Tensor containing the digit labels corresponding to each image crop.
+
+        alpha : float
+            Step size used for the SIRT update.
+
+        gamma : float or torch.Tensor
+            Scaling factor applied to the regularization gradient. For the
+            Bayesian regularizer, gamma contains the weights of the
+            classification and denoising gradient components.
+
+        sigma_data : float
+
+        mode : str
+
+
+        i : int
+            Current iteration index.
+
+        r : int
+            Current reconstruction or regularization step index.
+
+        batch_id : int
+            Index identifying the current batch.
+
+        regularizer : str
+            Type of regularization applied after the SIRT step.
+
+            - "none" : perform only the SIRT update.
+            - "NF" : use the normalizing flow gradient.
+            - "CDM" : use the conditional diffusion model gradient.
+            - "bayes" : use the Bayesian classification and/or denoising
+            gradient.
+
+        results_dir : str
+            Directory where gradient visualizations are saved when verbose
+            gradient logging is enabled.
+
+        name : str
+            Name used to identify the saved gradient visualization files.
+
+        verbose_gradient : bool
+            If True, log the gradient norm and periodically save a visualization
+            of the crop gradient.
+
+        **parameters : dict
+            Additional parameters required by the selected regularizer.
+
+            For "NF", the dictionary must contain:
+
+            - "model" : normalizing flow model used to compute the gradient.
+
+            For "CDM", the dictionary must contain:
+
+            - "score_model" : conditional diffusion score model.
+            - "t_input" : diffusion timestep input.
+            - "context_mask" : mask controlling the conditioning information.
+            - "fixed_noise" : fixed noise used to construct the noisy diffusion
+            sample.
+            - "sqrtab" : square root of the cumulative product of diffusion
+            coefficients.
+            - "sqrtmab" : square root of one minus the cumulative product of
+            diffusion coefficients.
+
+            For "bayes", the dictionary must contain:
+
+            - "class_model" : classification model used to compute the
+            classification gradient.
+            - "den_model" : denoising model used to compute the denoising
+            gradient.
+
+    Returns
+    -------
+    torch.Tensor
+        Updated batch of image reconstructions with the same shape as x.
+        The values are clamped to the interval [0, 1].
+
+    dict
+        Dictionary containing information returned by the SIRT step.
+
+    Notes
+    -----
+    The update first performs a SIRT reconstruction step. If no regularizer
+    is selected, the updated reconstruction is returned immediately.
+
+    When a regularizer is selected, image crops centred at centre are
+    extracted from the updated reconstruction. The corresponding regularizer
+    gradient is then computed on the crops and inserted back into the
+    full-size image before applying the final gradient descent update.
+
+    The regularization gradient is scaled according to the selected model
+    and the value of gamma. Gradient visualizations are optionally generated
+    for debugging purposes.
+    """
+
+    # SIRT STEP
     x, step_data = sirt_step(A_torch, AT_torch, x, y, alpha)
+
+    # case where only SIRT
     if mode == "none":
         return x.clamp(0, 1), step_data
 
+
+    # extracting crops
     crop_x = extract_crops(x, centre).detach().requires_grad_(True)
-    grad_crop = regularization_grad(crop_x, digit, i, batch_id, r)
-    if  batch_id == 0 and i % 2 == 0 and r==0: #batch_id == 0 and
+
+    # calculating the gradient of the crop image
+    if regularizer == "nf":
+        model = parameters["model"]
+        grad_crop = gamma * (sigma_data**2) * nfs_grad(crop_x, digit, mu_model)
+    
+    elif regularizer == "cdm":
+        score_model = parameters["score_model"]
+        t_input = parameters["t_input"]
+        context_mask = parameters["context_mask"]
+        fixed_noise = parameters["fixed_noise"]
+        sqrtab = parameters["sqrtab"]
+        sqrtmab = parameters["sqrtmab"]
+        grad_crop = gamma * (sigma_data**2) * cdm_grad(crop_x, digit, t_input, context_mask, fixed_noise, sqrtab, sqrtmab)
+
+    elif regularizer == "bayes":
+        class_model = parameters["class_model"]
+        den_model = parameters["den_model"]
+        grad_crop = (sigma_data**2) * bayes_grad(crop_x, digit, mode, gamma, class_model, den_model)
+
+    
+
+    # debugging gradient
+    if verbose_gradient and accelerator.is_main_process:
+        logger.info(f"Gradient descent step {batch_id}_{i}_{r}: {-grad_crop.flatten(1).norm(dim=1).mean().item()}")
+
+    if  verbose_gradient and batch_id == 0 and i % 2 == 0 and r==0: 
         plt.imshow(grad_crop[0,0].detach().cpu().numpy(), cmap="gray")
         plt.colorbar()
         plt.savefig(os.path.join(results_dir, f"{batch_id}_{i}_grad_crop_{name}.png"), dpi=300, bbox_inches="tight")
         plt.close()
-    grad_F = insert_crop_grad_in_image(x, grad_crop, centre)
+
+
+    # inserting the crop into the complete gradient
+    grad_F =  insert_crop_grad_in_image(x, grad_crop, centre)
+    
+    # gradient step
     x = (x - grad_F).clamp(0, 1)
 
     return x, step_data
+
 
 
 
