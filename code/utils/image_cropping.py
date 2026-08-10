@@ -41,6 +41,47 @@ def extract_crops(x, centre):
     return crops
 
 
+def insert_crop(x, crop, centre):
+    """
+    Insert a batch of image crops into the corresponding positions of a
+    batch of full-size images.
+
+    Parameters
+    ----------
+        x : torch.Tensor
+            Batch of full-size images with shape (B, 1, H, W).
+
+        crop : torch.Tensor
+            Batch of image crops with shape (B, 1, 28, 28). Each crop is inserted
+            into the corresponding image in x.
+
+        centre : torch.Tensor
+            Tensor containing the center coordinates of each crop with shape
+            (B, 2). For each sample, centre[b, 0] corresponds to the vertical
+            (y) coordinate and centre[b, 1] corresponds to the horizontal
+            (x) coordinate.
+
+    Returns
+    -------
+    torch.Tensor
+        Batch of images with the corresponding crops inserted at the
+        positions specified by centre. The returned tensor has the same
+        shape as x.
+
+    Notes
+    -----
+    For each sample, the crop is inserted into a 28 x 28 region centred at
+    the coordinates specified by centre.
+    """
+
+    B = x.shape[0]
+
+    for b in range(B):
+        cy = int(centre[b, 0].item())
+        cx = int(centre[b, 1].item())
+        x[b:b+1, :, cy-14:cy+14, cx-14:cx+14] = crop
+    
+    return x
 
 def insert_crop_grad_in_image(x, grad_crop, centre, scale_param, fill_mode="none"):
     """

@@ -1,6 +1,20 @@
+import torch
+import torch.nn.functional as F
+import numpy as np
+from code.utils.gradients import update_case
+from code.utils.image_cropping import extract_crops
+from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse
+from code.ct_recon.SIRT import sirt_step
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import math
+import os
+
+
 
     
-def inverse_gradient_only_pipeline(y, x, A_torch, AT_torch, alpha, gamma, R_ini, R_min, R_max, I, decay_iters, H, W, x_true, centre_true, digit_true, regularizer, batch_id, results_dir, name, accelerator, verbose_images, verbose_metrics, verbose_convergence, verbose_gradient, **parameters):
+def inverse_gradient_only_pipeline(y, x, A_torch, AT_torch, alpha, gamma, sigma_data, R_ini, R_min, R_max, I, decay_iters, H, W, x_true, centre_true, digit_true, regularizer, batch_id, results_dir, name, accelerator, verbose_images, verbose_metrics, verbose_convergence, verbose_gradient, logger, **parameters):
     
     regularizer = regularizer.strip().lower()
 
@@ -61,16 +75,9 @@ def inverse_gradient_only_pipeline(y, x, A_torch, AT_torch, alpha, gamma, R_ini,
 
 
     # Metrics after the initialization with SIRT (equi to I = -1, with R_ini steps)
-    crop_x_true = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-    crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-    crop_x_sirt = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-
-    for b in range(B):
-        cy = int(centre_true[b, 0].item())
-        cx = int(centre_true[b, 1].item())
-        crop_x_true[b:b+1] = x_true[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-        crop_x[b:b+1] = x[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-        crop_x_sirt[b:b+1] = x_sirt[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+    crop_x_true = extract_crops(x_true, centre_true )
+    crop_x = extract_crops(x, centre_true )
+    crop_x_sirt = extract_crops(x_sirt, centre_true )
 
         
     psnr_x_init = compute_psnr_results(x.detach(), x_true.detach())
@@ -180,37 +187,28 @@ def inverse_gradient_only_pipeline(y, x, A_torch, AT_torch, alpha, gamma, R_ini,
         for r in range(R):
 
             # BOTH image, meaning the one using the complete gradient
-            x_both , _ = update_case(x_both, y, A_torch, AT_torch, centre, digit, alpha, gamma, "both", i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters)
+            x_both , _ = update_case(x_both, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data, "both", False, i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters)
 
             # SIRT image
-            x_sirt , _ = update_case(x_sirt, y, A_torch, AT_torch, centre, digit, alpha, gamma, "none", i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters)
+            x_sirt , _ = update_case(x_sirt, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data, "none", True, i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters)
 
             if regularizer == "bayes":
                 #only classifier
-                x_class , _ = update_case(x_class, y, A_torch, AT_torch, centre, digit, alpha, gamma, "class", i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters)
+                x_class , _ = update_case(x_class, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data, "class", False, i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters)
 
                 #only denoiser
-                x_deno , _ = update_case(x_deno, y, A_torch, AT_torch, centre, digit, alpha, gamma, "deno", i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters)
+                x_deno , _ = update_case(x_deno, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data, "deno", False, i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters)
 
 
         # taking crops
-        crop_x = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-        crop_x_both = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-        crop_x_sirt = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-
+        crop_x = extract_crops(x_true, centre_true )
+        crop_x_both = extract_crops(x_both, centre_true )
+        crop_x_sirt = extract_crops(x_sirt, centre_true )
+        
         if regularizer == "bayes":
-            crop_x_class = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-            crop_x_deno = torch.zeros(B, 1, 28, 28, device=y.device, dtype=x.dtype)
-
-        for b in range(B):
-            cy = int(centre_true[b, 0].item())
-            cx = int(centre_true[b, 1].item())
-            crop_x[b:b+1] = x_true[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-            crop_x_both[b:b+1] = x_both[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-            crop_x_sirt[b:b+1] = x_sirt[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-            if regularizer == "bayes":
-                crop_x_class[b:b+1] = x_class[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
-                crop_x_deno[b:b+1] = x_deno[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+            crop_x_class = extract_crops(x_class, centre_true )
+            crop_x_deno = extract_crops(x_deno, centre_true)
+            
 
 
         # computing metrics 

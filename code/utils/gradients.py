@@ -197,7 +197,7 @@ def bayes_grad(crop_x, digit, mode, i, batch_id, gamma, class_model, den_model):
 
 
 
-def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data, mode, i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters):
+def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data, mode, if_sirt, i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters):
 
     """
     Perform one reconstruction update consisting of a SIRT step followed,
@@ -321,11 +321,11 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
     """
 
     # SIRT STEP
-    x, step_data = sirt_step(A_torch, AT_torch, x, y, alpha)
-
-    # case where only SIRT
-    if mode == "none":
-        return x.clamp(0, 1), step_data
+    if if_sirt:
+        x, step_data = sirt_step(A_torch, AT_torch, x, y, alpha)
+        # case where only SIRT
+        if mode == "none":
+            return x.clamp(0, 1), step_data
 
 
     # extracting crops
@@ -334,7 +334,7 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
     # calculating the gradient of the crop image
     if regularizer == "nf":
         model = parameters["model"]
-        grad_crop = gamma * (sigma_data**2) * nfs_grad(crop_x, digit, mu_model)
+        grad_crop = gamma * (sigma_data**2) * nfs_grad(crop_x, digit, model)
     
     elif regularizer == "cdm":
         score_model = parameters["score_model"]
@@ -364,12 +364,15 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
 
 
     # inserting the crop into the complete gradient
-    grad_F =  insert_crop_grad_in_image(x, grad_crop, centre)
+    grad_F =  insert_crop_grad_in_image(x, grad_crop, centre, None)
     
     # gradient step
     x = (x - grad_F).clamp(0, 1)
 
-    return x, step_data
+    if if_sirt:
+        return x, step_data
+    else:
+        return x, "None"
 
 
 

@@ -5,7 +5,7 @@ import torch
 
 
 def normalizing_flow_model(L= 2,K= 32,input_shape= (1, 28, 28), channels=1, hidden_channels= 256, split_mode= 'channel', 
-                            scale= "True", num_classes=10):
+                            scale= "True", num_classes=10, device="CUDA"):
     """
     Build and initialize a class-conditional multiscale normalizing flow model.
 

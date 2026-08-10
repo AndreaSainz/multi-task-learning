@@ -1,6 +1,7 @@
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import os
 
 def get_image(data, sample):
     """
@@ -77,19 +78,15 @@ def get_image(data, sample):
     return image.detach().cpu().numpy()
 
 
-def images_plots(results_dir, name, batch_id, sample, images):
+def images_plots(results_dir, name, batch_id, sample, images, iteration=-1):
     """
     Generate and save a comparison figure showing the selected sample from
     multiple image collections using a common grayscale color scale.
 
-    The selected sample from each image collection is displayed in a separate
-    subplot, with a shared colorbar based on the minimum and maximum values
-    across all selected images.
-
     Parameters
     ----------
         results_dir : str
-            Directory where the generated figure will be saved.
+            Directory where the generated figure is saved.
 
         name : str
             Name used to identify the comparison in the output filename.
@@ -98,66 +95,71 @@ def images_plots(results_dir, name, batch_id, sample, images):
             Identifier of the batch, used in the output filename.
 
         sample : int
-            Index of the sample to visualize from each image collection.
+            Index of the sample to visualize when a batch dimension is present.
 
         images : dict
-            Dictionary containing the images to compare. The keys are used as
-            subplot titles and the values must be tensors containing the image
-            samples.
+            Dictionary containing the image collections to compare. Values can
+            either be image tensors or lists of image tensors.
 
-
-    Example:
-
-        images = {
-            "Ground Truth": ground_truth,
-            "Prediction": prediction,
-            "Input": input_images,
-        }
+        iteration : int, optional
+            Index of the reconstruction to visualize when an image collection
+            is provided as a list. Defaults to -1, corresponding to the last
+            reconstruction.
 
     Saves
     -----
     A PNG file is saved in results_dir with the following format:
 
     {batch_id}_comparison_{name}.png
-        Comparison figure containing the selected sample from each image
-        collection with a shared color scale.
     """
 
     n = len(images)
 
-    fig, axes = plt.subplots(1, n, figsize=(6*n, 4))
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 4))
 
-     # In case n=1, we need axes to be a list
     if n == 1:
         axes = [axes]
 
-
-    # Same colorbar for all images
     all_imgs = []
-    for name, list_images  in images.items():
-        image = get_image(list_images, sample)
+
+    for image_name, image_collection in images.items():
+
+        if isinstance(image_collection, list):
+            data = image_collection[iteration]
+        else:
+            data = image_collection
+
+        #if batch_size is bigger than 1 then I can get sample>1, otherwise there is only one sample in the batch
+        if data.shape[0] > 1:
+            image = get_image(data, sample)
+        else:
+            image = get_image(data, 0)
         all_imgs.append(image)
 
-    # min and max of the colobar
     vmin = min(img.min() for img in all_imgs)
     vmax = max(img.max() for img in all_imgs)
 
-    
-    for i, (image_name, list_images) in enumerate(images.items()):
-        image = get_image(list_images, sample)
+    for i, (image_name, image_collection) in enumerate(images.items()):
 
-        im = axes[i].imshow(image, cmap="gray", vmin=vmin, vmax=vmax)
+        if isinstance(image_collection, list):
+            data = image_collection[iteration]
+        else:
+            data = image_collection
+
+        image = get_image(data, sample)
+
+        im = axes[i].imshow(image,cmap="gray",vmin=vmin,vmax=vmax)
+
         axes[i].set_title(image_name)
         axes[i].axis("off")
 
-    # colorbar settings
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
     fig.colorbar(im, cax=cbar_ax)
 
     plt.tight_layout(rect=[0, 0, 0.9, 1])
 
-    #save figure
-    plt.savefig(os.path.join(results_dir, f"{batch_id}_comparison_{name}.png"), dpi=300, bbox_inches="tight")
+    plt.savefig(os.path.join(results_dir,f"{batch_id}_comparison_{name}.png"),dpi=300,bbox_inches="tight")
+
     plt.close()
 
 
