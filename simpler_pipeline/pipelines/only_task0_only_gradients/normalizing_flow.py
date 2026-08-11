@@ -1,0 +1,243 @@
+import torch
+import torch.nn.functional as F
+from accelerate import Accelerator
+from tomosipo.torch_support import to_autograd
+import numpy as np
+import tomosipo as ts
+from torch.utils.data import DataLoader, random_split
+from code.dataloader.data_import import import_data
+from code.models.classifier import CNNClassifier
+from code.models.denoiser import ResUNetDenoiser
+from code.models.normalizing_flow import normalizing_flow_model
+from code.pipelines.pipelines import inverse_gradient_only_pipeline
+from code.utils.image_cropping import extract_crops, insert_crop
+from code.utils.image_initilization import true_images_lines
+from code.utils.plots import images_plots, psnr_plots, ssim_plots
+from code.utils.logger import setup_logger
+from code.ct_recon.operators import ct_operator
+import matplotlib
+import logging
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import os
+
+
+
+###################################################################### Parameters #####################################################################
+
+### data
+accelerator = Accelerator()
+device = accelerator.device
+n_train = 10
+batch_size = 1
+save_batch_id = 0
+H = 100
+W = 100
+num_angles = 60
+angle_range = [0, np.pi]
+i_0 = 10**5
+sigma_data = 0.3
+
+
+### training parameters
+R_ini = 80
+R_min = 70
+R_max = 70
+decay_iters = 70
+I = 10
+alpha = 2e-1/(75.77664947509766)**2            #1/(liptchitz constant)^2: 2e-1/(53.595951080322266)**2 
+gamma = 5e-9
+
+
+# saving directory
+results_dir = "simpler_pipeline/Results/ExperimentsNF/bands"
+os.makedirs(results_dir, exist_ok=True)
+
+# logger and file names
+log_dir = "logs"
+name = "nfs_central_bands"
+os.makedirs(log_dir, exist_ok=True)
+
+## seeds
+seed = 29072000
+torch.manual_seed(0)
+
+
+## model parameters (GLOW model)
+L = 2               #number of latent variables (z_l)
+K = 32              #how complex the invertible function is
+input_shape = (1, 28, 28)
+n_dims = np.prod(input_shape)
+channels = 1
+hidden_channels = 256           #how large are CNN inside GlowBlocks, so s() and t()
+split_mode = 'channel'
+scale = True
+num_classes = 10
+
+
+###################################################################### Logger ##################################################################
+logger = setup_logger(log_dir, name, accelerator = accelerator)
+
+###################################################################### Data #####################################################################
+
+# define CT geometry
+A = ct_operator(H, W, angle_range, num_angles, "parallel")
+A_torch  = to_autograd(A,   is_2d=True, num_extra_dims=2)
+AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
+
+
+# create pytorch training dataloader
+train_dataloader = import_data(True, False, n_train, None, A, num_angles, sigma_data, i_0, H, W, batch_size, seed, logger, accelerator, device)
+
+###################################################################### Trained NF Model #####################################################################
+
+mu_model = normalizing_flow_model(L,K,input_shape, channels, hidden_channels, split_mode, scale, num_classes, device)
+
+# Import trained mu(x_cropped|digit)
+checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/normalizing_flow/glow_mnist_checkpoint_clean.pt", map_location=device)
+mu_model.load_state_dict(checkpoint["model_state_dict"])
+
+# model in evaluation mode, we don't want to train it
+mu_model.eval() 
+for p in mu_model.parameters():
+   p.requires_grad_(False)
+
+#parameters for the main loop function
+regularizer = "nf"
+parameters = {
+    "model": mu_model
+}
+
+mu_model, train_dataloader = accelerator.prepare(mu_model, train_dataloader)
+###################################################################### Multi-task function ###############################################################
+
+# initilizing empty lists
+gt_images = []
+gt_digits = []
+gt_centers = []
+model_images = []
+sirt_images = []
+model_psnr = []
+sirt_psnr = []
+model_ssim = []
+sirt_ssim = []
+model_psnr_crop = []
+sirt_psnr_crop = []
+model_ssim_crop = []
+sirt_ssim_crop = []
+
+
+
+for batch_id, batch in enumerate(train_dataloader):
+
+    ground_truth_1 = batch["ground_truth_image"]
+    ground_truth_2 = batch["label"]
+    ground_truth_3 = batch["centre"]
+    input_data = batch["noisy_sinogram"]
+
+    B = ground_truth_1.shape[0]
+
+    #check batch_size
+    if B != batch_size:
+        raise ValueError(f"Batch Size is not weel defined, B:{B} is not {batch_size}")
+
+
+    # Initializing the image with a white band on the digit
+    x = true_images_lines(ground_truth_1, ground_truth_3, H, W, False, None, True, 5)
+
+    # # Initilizing with black image
+    # x = torch.zeros(B, 1, H, W, device=x_true.device)
+
+    # # Initlizing the image with random black pixels in the digit
+    # x = true_images_pixels(ground_truth_1, ground_truth_3, H, W, False, None, 0.2)
+
+
+
+    
+
+    if accelerator.is_main_process and batch_id == 0 :
+        logger.info(f"Original digit: {ground_truth_2}")
+        logger.info(f"original centre: {ground_truth_3}")
+
+    images, images_SIRT, psnr_history, ssim_history = inverse_gradient_only_pipeline(input_data, x, A_torch, AT_torch, alpha, 
+                                                        gamma, sigma_data, R_ini, R_min, R_max, I, decay_iters, H, W, ground_truth_1, 
+                                                        ground_truth_3, ground_truth_2, regularizer, batch_id, results_dir, 
+                                                        name, accelerator, True, True, False, False, logger, **parameters)
+
+
+    if accelerator.is_main_process and batch_id == 0:
+
+        #defining a dictorionary with the images
+        images_dict = {"SIRT only": images_SIRT, "SIRT + NF": images, "Ground Truth": ground_truth_1}
+
+        # images plot
+        images_plots(results_dir, name, batch_id, save_batch_id, images_dict)
+
+        # PSNR plots 
+        psnr_plots(results_dir, name, batch_id, psnr_history)
+
+        # SSIM plots 
+        ssim_plots(results_dir, name, batch_id, ssim_history)
+
+    
+    for b in range(B):
+        gt_images.append(ground_truth_1.detach().cpu())
+        gt_digits.append(ground_truth_2.detach().cpu())
+        gt_centers.append(ground_truth_3.detach().cpu())
+        model_images.append(images)
+        sirt_images.append(images_SIRT)
+        sirt_psnr.append([d["psnr_x_sirt"] for d in psnr_history])
+        model_psnr.append([d["psnr_x"] for d in psnr_history])
+        sirt_ssim.append([d["ssim_x_sirt"] for d in ssim_history])
+        model_ssim.append([d["ssim_x"] for d in ssim_history])
+        sirt_psnr_crop.append([d["psnr_x_sirt_crop"] for d in psnr_history])
+        model_psnr_crop.append([d["psnr_x_crop"] for d in psnr_history])
+        sirt_ssim_crop.append([d["ssim_x_sirt_crop"] for d in ssim_history])
+        model_ssim_crop.append([d["ssim_x_crop"] for d in ssim_history])
+
+
+    results = {
+        "R_ini" : R_ini,
+        "R_min" : R_min,
+        "R_max" : R_max,
+        "decay_iters" : decay_iters,
+        "I" : I,
+        "sigma_data": sigma_data,
+        "i_0": i_0,
+        "num_angles" : num_angles,
+        "angle_range" : angle_range,
+        "gt_images": gt_images,
+        "gt_digits": gt_digits,
+        "gt_centers": gt_centers,
+        "model_images": model_images,      # [batch][iter][B,1,H,W]
+        "sirt_images": sirt_images,
+        "sirt_psnr": sirt_psnr,
+        "model_psnr": model_psnr,
+        "sirt_ssim": sirt_ssim,
+        "model_ssim": model_ssim,
+        "sirt_psnr_crop": sirt_psnr_crop,
+        "model_psnr_crop": model_psnr_crop,
+        "sirt_ssim_crop": sirt_ssim_crop,
+        "model_ssim_crop": model_ssim_crop
+        }
+
+
+    rank = accelerator.process_index
+    torch.save( results, os.path.join(results_dir, f"results_mnist_ct_{name}_rank{rank}.pt" ))
+
+    accelerator.wait_for_everyone()
+
+    if accelerator.is_main_process:
+        for h in list(logger.handlers):
+            try:
+                h.flush()
+                h.close()
+            finally:
+                logger.removeHandler(h)
+
+        logging.shutdown()
+
+    accelerator.wait_for_everyone()
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()

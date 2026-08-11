@@ -198,10 +198,9 @@ def bayes_grad(crop_x, digit, mode, i, batch_id, gamma, class_model, den_model):
 
 
 def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data, mode, if_sirt, i, r, batch_id, regularizer, results_dir, name, verbose_gradient, **parameters):
-
     """
-    Perform one reconstruction update consisting of a SIRT step followed,
-    optionally, by a regularization gradient step.
+    Perform one reconstruction update consisting of an optional SIRT step
+    followed by a regularization gradient step.
 
     Parameters
     ----------
@@ -233,19 +232,31 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
 
         gamma : float or torch.Tensor
             Scaling factor applied to the regularization gradient. For the
-            Bayesian regularizer, gamma contains the weights of the
-            classification and denoising gradient components.
+            Bayesian regularizer, gamma contains the weights of the classification
+            and denoising gradient components.
 
         sigma_data : float
+            Data noise scale used to scale the regularization gradient.
 
         mode : str
+            Specifies which reconstruction update is performed.
 
+            - "none" : perform only the SIRT update when if_sirt is True.
+            - "both" : use the complete regularization gradient.
+            - "class" : use only the classification gradient for the Bayesian
+            regularizer.
+            - "deno" : use only the denoising gradient for the Bayesian
+            regularizer.
+
+        if_sirt : bool
+            If True, perform a SIRT update before computing the regularization
+            gradient. If False, only the regularization gradient is applied.
 
         i : int
-            Current iteration index.
+            Current outer iteration index.
 
         r : int
-            Current reconstruction or regularization step index.
+            Current inner reconstruction or regularization step index.
 
         batch_id : int
             Index identifying the current batch.
@@ -253,9 +264,8 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
         regularizer : str
             Type of regularization applied after the SIRT step.
 
-            - "none" : perform only the SIRT update.
-            - "NF" : use the normalizing flow gradient.
-            - "CDM" : use the conditional diffusion model gradient.
+            - "nf" : use the normalizing flow gradient.
+            - "cdm" : use the conditional diffusion model gradient.
             - "bayes" : use the Bayesian classification and/or denoising
             gradient.
 
@@ -273,11 +283,11 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
         **parameters : dict
             Additional parameters required by the selected regularizer.
 
-            For "NF", the dictionary must contain:
+            For "nf", the dictionary must contain:
 
             - "model" : normalizing flow model used to compute the gradient.
 
-            For "CDM", the dictionary must contain:
+            For "cdm", the dictionary must contain:
 
             - "score_model" : conditional diffusion score model.
             - "t_input" : diffusion timestep input.
@@ -302,22 +312,29 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
         Updated batch of image reconstructions with the same shape as x.
         The values are clamped to the interval [0, 1].
 
-    dict
-        Dictionary containing information returned by the SIRT step.
+    torch.Tensor or str
+        Information returned by the SIRT step. If if_sirt is True, this is
+        the step_data returned by sirt_step. If if_sirt is False, the value
+        is the string "None".
 
     Notes
     -----
-    The update first performs a SIRT reconstruction step. If no regularizer
-    is selected, the updated reconstruction is returned immediately.
+    If if_sirt is True, the function first performs a SIRT reconstruction
+    step. If mode is "none", the SIRT-updated reconstruction is returned
+    without applying a regularization gradient.
 
-    When a regularizer is selected, image crops centred at centre are
-    extracted from the updated reconstruction. The corresponding regularizer
-    gradient is then computed on the crops and inserted back into the
-    full-size image before applying the final gradient descent update.
+    Otherwise, image crops centered at centre are extracted from the current
+    reconstruction. The corresponding regularization gradient is computed
+    on the crops and inserted back into the full-size image before applying
+    the gradient descent update.
 
-    The regularization gradient is scaled according to the selected model
-    and the value of gamma. Gradient visualizations are optionally generated
-    for debugging purposes.
+    The regularization gradient is scaled by sigma_data**2 and, where
+    applicable, by gamma. For the Bayesian regularizer, mode determines
+    whether the classification gradient, denoising gradient, or both are
+    used.
+
+    Gradient logging and visualization are optionally performed when
+    verbose_gradient is True.
     """
 
     # SIRT STEP
@@ -373,6 +390,10 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
         return x, step_data
     else:
         return x, "None"
+
+
+
+
 
 
 
@@ -473,3 +494,5 @@ def score_centers_difussion_model(
         return map_x, digit_map
 
     return map_x
+
+
