@@ -39,13 +39,13 @@ sigma_data = 0.3
 
 
 ### training parameters
-R_ini = 80
-R_min = 70
-R_max = 70
-decay_iters = 70
-I = 10
+R_ini = 90
+R_min = 90
+R_max = 90
+decay_iters = 90
+I = 40
 alpha = 2e-1/(75.77664947509766)**2            #1/(liptchitz constant)^2: 2e-1/(53.595951080322266)**2 
-gamma  = [8e-2, 5e-2] 
+gamma  = [0.52, 0.12]   #[8e-2, 5e-2] 
 
 
 # saving directory
@@ -114,14 +114,24 @@ gt_digits = []
 gt_centers = []
 model_images = []
 sirt_images = []
+class_images = []
+deno_images = []
 model_psnr = []
 sirt_psnr = []
+class_psnr = []
+deno_psnr = []
 model_ssim = []
 sirt_ssim = []
+class_ssim = []
+deno_ssim = []
 model_psnr_crop = []
 sirt_psnr_crop = []
+class_psnr_crop = []
+deno_psnr_crop = []
 model_ssim_crop = []
 sirt_ssim_crop = []
+class_ssim_crop = []
+deno_ssim_crop = []
 
 
 
@@ -156,7 +166,7 @@ for batch_id, batch in enumerate(train_dataloader):
         logger.info(f"Original digit: {ground_truth_2}")
         logger.info(f"original centre: {ground_truth_3}")
 
-    images, images_SIRT, psnr_history, ssim_history = inverse_gradient_only_pipeline(input_data, x, A_torch, AT_torch, alpha, 
+    images, images_SIRT, images_class, images_deno, psnr_history, ssim_history = inverse_gradient_only_pipeline(input_data, x, A_torch, AT_torch, alpha, 
                                                         gamma, sigma_data, R_ini, R_min, R_max, I, decay_iters, H, W, ground_truth_1, 
                                                         ground_truth_3, ground_truth_2, regularizer, batch_id, results_dir, 
                                                         name, accelerator, True, True, False, False, logger, **parameters)
@@ -165,7 +175,7 @@ for batch_id, batch in enumerate(train_dataloader):
     if accelerator.is_main_process and batch_id == 0:
 
         #defining a dictorionary with the images
-        images_dict = {"SIRT only": images_SIRT, "SIRT + NF": images, "Ground Truth": ground_truth_1}
+        images_dict = {"SIRT only": images_SIRT, "SIRT + bayes": images, "SIRT + Class": images_class, "SIRT + Deno": images_deno, "Ground Truth": ground_truth_1}
 
         # images plot
         images_plots(results_dir, name, batch_id, save_batch_id, images_dict)
@@ -177,64 +187,88 @@ for batch_id, batch in enumerate(train_dataloader):
         ssim_plots(results_dir, name, batch_id, ssim_history)
 
     
-    for b in range(B):
-        gt_images.append(ground_truth_1.detach().cpu())
-        gt_digits.append(ground_truth_2.detach().cpu())
-        gt_centers.append(ground_truth_3.detach().cpu())
-        model_images.append(images)
-        sirt_images.append(images_SIRT)
-        sirt_psnr.append([d["psnr_x_sirt"] for d in psnr_history])
-        model_psnr.append([d["psnr_x"] for d in psnr_history])
-        sirt_ssim.append([d["ssim_x_sirt"] for d in ssim_history])
-        model_ssim.append([d["ssim_x"] for d in ssim_history])
-        sirt_psnr_crop.append([d["psnr_x_sirt_crop"] for d in psnr_history])
-        model_psnr_crop.append([d["psnr_x_crop"] for d in psnr_history])
-        sirt_ssim_crop.append([d["ssim_x_sirt_crop"] for d in ssim_history])
-        model_ssim_crop.append([d["ssim_x_crop"] for d in ssim_history])
+        for b in range(B):
+            gt_images.append(ground_truth_1.detach().cpu())
+            gt_digits.append(ground_truth_2.detach().cpu())
+            gt_centers.append(ground_truth_3.detach().cpu())
+            model_images.append(images)
+            sirt_images.append(images_SIRT)
+            class_images.append(images_class)
+            deno_images.append(images_deno)
+            sirt_psnr.append([d["psnr_x_sirt"] for d in psnr_history])
+            model_psnr.append([d["psnr_x"] for d in psnr_history])
+            class_psnr.append([d["psnr_x_class"] for d in psnr_history])
+            deno_psnr.append([d["psnr_x_deno"] for d in psnr_history])
+            sirt_ssim.append([d["ssim_x_sirt"] for d in ssim_history])
+            model_ssim.append([d["ssim_x"] for d in ssim_history])
+            class_ssim.append([d["ssim_x_class"] for d in ssim_history])
+            deno_ssim.append([d["ssim_x_deno"] for d in ssim_history])
+            sirt_psnr_crop.append([d["psnr_x_sirt_crop"] for d in psnr_history])
+            model_psnr_crop.append([d["psnr_x_crop"] for d in psnr_history])
+            class_psnr_crop.append([d["psnr_x_class_crop"] for d in psnr_history])
+            deno_psnr_crop.append([d["psnr_x_deno_crop"] for d in psnr_history])
+            sirt_ssim_crop.append([d["ssim_x_sirt_crop"] for d in ssim_history])
+            model_ssim_crop.append([d["ssim_x_crop"] for d in ssim_history])    
+            class_ssim_crop.append([d["ssim_x_class_crop"] for d in ssim_history])
+            deno_ssim_crop.append([d["ssim_x_deno_crop"] for d in ssim_history])
 
 
-    results = {
-        "R_ini" : R_ini,
-        "R_min" : R_min,
-        "R_max" : R_max,
-        "decay_iters" : decay_iters,
-        "I" : I,
-        "sigma_data": sigma_data,
-        "i_0": i_0,
-        "num_angles" : num_angles,
-        "angle_range" : angle_range,
-        "gt_images": gt_images,
-        "gt_digits": gt_digits,
-        "gt_centers": gt_centers,
-        "model_images": model_images,      # [batch][iter][B,1,H,W]
-        "sirt_images": sirt_images,
-        "sirt_psnr": sirt_psnr,
-        "model_psnr": model_psnr,
-        "sirt_ssim": sirt_ssim,
-        "model_ssim": model_ssim,
-        "sirt_psnr_crop": sirt_psnr_crop,
-        "model_psnr_crop": model_psnr_crop,
-        "sirt_ssim_crop": sirt_ssim_crop,
-        "model_ssim_crop": model_ssim_crop
-        }
 
 
-    rank = accelerator.process_index
-    torch.save( results, os.path.join(results_dir, f"results_mnist_ct_{name}_rank{rank}.pt" ))
+        results = {
+            "R_ini" : R_ini,
+            "R_min" : R_min,
+            "R_max" : R_max,
+            "decay_iters" : decay_iters,
+            "I" : I,
+            "sigma_data": sigma_data,
+            "i_0": i_0,
+            "num_angles" : num_angles,
+            "angle_range" : angle_range,
+            "gt_images": gt_images,
+            "gt_digits": gt_digits,
+            "gt_centers": gt_centers,
+            "model_images": model_images,      # [batch][iter][B,1,H,W]
+            "sirt_images": sirt_images,
+            "class_images": class_images,      
+            "deno_images": deno_images,
+            "sirt_psnr": sirt_psnr,
+            "model_psnr": model_psnr,
+            "class_psnr": class_psnr,
+            "deno_psnr": deno_psnr,
+            "sirt_ssim": sirt_ssim,
+            "model_ssim": model_ssim,
+            "class_ssim": class_ssim,
+            "deno_ssim": deno_ssim,
+            "sirt_psnr_crop": sirt_psnr_crop,
+            "model_psnr_crop": model_psnr_crop,
+            "class_psnr_crop": class_psnr_crop,
+            "deno_psnr_crop": deno_psnr_crop,
+            "sirt_ssim_crop": sirt_ssim_crop,
+            "model_ssim_crop": model_ssim_crop,
+            "class_ssim_crop": class_ssim_crop,
+            "deno_ssim_crop": deno_ssim_crop
+            }
 
-    accelerator.wait_for_everyone()
 
-    if accelerator.is_main_process:
-        for h in list(logger.handlers):
-            try:
-                h.flush()
-                h.close()
-            finally:
-                logger.removeHandler(h)
+        rank = accelerator.process_index
+        torch.save( results, os.path.join(results_dir, f"results_mnist_ct_{name}_rank{rank}.pt" ))
 
-        logging.shutdown()
+        accelerator.wait_for_everyone()
 
-    accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            for h in list(logger.handlers):
+                try:
+                    h.flush()
+                    h.close()
+                finally:
+                    logger.removeHandler(h)
 
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
+            logging.shutdown()
+
+        accelerator.wait_for_everyone()
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        
+        break

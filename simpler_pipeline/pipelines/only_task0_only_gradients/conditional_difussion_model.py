@@ -44,7 +44,7 @@ R_max = 70
 decay_iters = 70
 I = 10
 alpha = 2e-1/(75.77664947509766)**2            #1/(liptchitz constant)^2: 2e-1/(53.595951080322266)**2 
-gamma = 1e-3
+gamma =  5e-2 #1e-3
 
 
 # saving directory
@@ -79,7 +79,8 @@ train_dataloader = import_data(True, False, n_train, None, A, num_angles, sigma_
 
 score_model = ContextUnet(in_channels=1, n_feat=128, n_classes=10)
 
-checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/diffusion model/model_39.pth", map_location="cpu")
+checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/diffusion_model/model_39.pth", map_location="cpu")
+t = torch.full((batch_size,), 5, device=device) #time step in the denoiser
 alpha_t = checkpoint["alpha_t"]
 beta_t = 1 - alpha_t
 beta1 = beta_t[0].item()
@@ -104,11 +105,13 @@ t_input = t.float().view(batch_size, 1) / T_max
 fixed_noise = torch.randn((batch_size, 1, 28, 28), device=device)
 context_mask = torch.zeros(batch_size, device=device) #we want to use the condition
 
+score_model,train_dataloader = accelerator.prepare(score_model, train_dataloader)
 
 #parameters for the main loop function
-regularizer = "nf"
+regularizer = "cdm"
 parameters = {
     "score_model": score_model,
+    "t" : t,
     "t_input" : t_input,
     "context_mask" : context_mask,
     "fixed_noise" : fixed_noise,
@@ -176,7 +179,7 @@ for batch_id, batch in enumerate(train_dataloader):
     if accelerator.is_main_process and batch_id == 0:
 
         #defining a dictorionary with the images
-        images_dict = {"SIRT only": images_SIRT, "SIRT + NF": images, "Ground Truth": ground_truth_1}
+        images_dict = {"SIRT only": images_SIRT, "SIRT + CDM": images, "Ground Truth": ground_truth_1}
 
         # images plot
         images_plots(results_dir, name, batch_id, save_batch_id, images_dict)
@@ -188,64 +191,66 @@ for batch_id, batch in enumerate(train_dataloader):
         ssim_plots(results_dir, name, batch_id, ssim_history)
 
     
-    for b in range(B):
-        gt_images.append(ground_truth_1.detach().cpu())
-        gt_digits.append(ground_truth_2.detach().cpu())
-        gt_centers.append(ground_truth_3.detach().cpu())
-        model_images.append(images)
-        sirt_images.append(images_SIRT)
-        sirt_psnr.append([d["psnr_x_sirt"] for d in psnr_history])
-        model_psnr.append([d["psnr_x"] for d in psnr_history])
-        sirt_ssim.append([d["ssim_x_sirt"] for d in ssim_history])
-        model_ssim.append([d["ssim_x"] for d in ssim_history])
-        sirt_psnr_crop.append([d["psnr_x_sirt_crop"] for d in psnr_history])
-        model_psnr_crop.append([d["psnr_x_crop"] for d in psnr_history])
-        sirt_ssim_crop.append([d["ssim_x_sirt_crop"] for d in ssim_history])
-        model_ssim_crop.append([d["ssim_x_crop"] for d in ssim_history])
+        for b in range(B):
+            gt_images.append(ground_truth_1.detach().cpu())
+            gt_digits.append(ground_truth_2.detach().cpu())
+            gt_centers.append(ground_truth_3.detach().cpu())
+            model_images.append(images)
+            sirt_images.append(images_SIRT)
+            sirt_psnr.append([d["psnr_x_sirt"] for d in psnr_history])
+            model_psnr.append([d["psnr_x"] for d in psnr_history])
+            sirt_ssim.append([d["ssim_x_sirt"] for d in ssim_history])
+            model_ssim.append([d["ssim_x"] for d in ssim_history])
+            sirt_psnr_crop.append([d["psnr_x_sirt_crop"] for d in psnr_history])
+            model_psnr_crop.append([d["psnr_x_crop"] for d in psnr_history])
+            sirt_ssim_crop.append([d["ssim_x_sirt_crop"] for d in ssim_history])
+            model_ssim_crop.append([d["ssim_x_crop"] for d in ssim_history])
 
 
-    results = {
-        "R_ini" : R_ini,
-        "R_min" : R_min,
-        "R_max" : R_max,
-        "decay_iters" : decay_iters,
-        "I" : I,
-        "sigma_data": sigma_data,
-        "i_0": i_0,
-        "num_angles" : num_angles,
-        "angle_range" : angle_range,
-        "gt_images": gt_images,
-        "gt_digits": gt_digits,
-        "gt_centers": gt_centers,
-        "model_images": model_images,      # [batch][iter][B,1,H,W]
-        "sirt_images": sirt_images,
-        "sirt_psnr": sirt_psnr,
-        "model_psnr": model_psnr,
-        "sirt_ssim": sirt_ssim,
-        "model_ssim": model_ssim,
-        "sirt_psnr_crop": sirt_psnr_crop,
-        "model_psnr_crop": model_psnr_crop,
-        "sirt_ssim_crop": sirt_ssim_crop,
-        "model_ssim_crop": model_ssim_crop
-        }
+        results = {
+            "R_ini" : R_ini,
+            "R_min" : R_min,
+            "R_max" : R_max,
+            "decay_iters" : decay_iters,
+            "I" : I,
+            "sigma_data": sigma_data,
+            "i_0": i_0,
+            "num_angles" : num_angles,
+            "angle_range" : angle_range,
+            "gt_images": gt_images,
+            "gt_digits": gt_digits,
+            "gt_centers": gt_centers,
+            "model_images": model_images,      # [batch][iter][B,1,H,W]
+            "sirt_images": sirt_images,
+            "sirt_psnr": sirt_psnr,
+            "model_psnr": model_psnr,
+            "sirt_ssim": sirt_ssim,
+            "model_ssim": model_ssim,
+            "sirt_psnr_crop": sirt_psnr_crop,
+            "model_psnr_crop": model_psnr_crop,
+            "sirt_ssim_crop": sirt_ssim_crop,
+            "model_ssim_crop": model_ssim_crop
+            }
 
 
-    rank = accelerator.process_index
-    torch.save( results, os.path.join(results_dir, f"results_mnist_ct_{name}_rank{rank}.pt" ))
+        rank = accelerator.process_index
+        torch.save( results, os.path.join(results_dir, f"results_mnist_ct_{name}_rank{rank}.pt" ))
 
-    accelerator.wait_for_everyone()
+        accelerator.wait_for_everyone()
 
-    if accelerator.is_main_process:
-        for h in list(logger.handlers):
-            try:
-                h.flush()
-                h.close()
-            finally:
-                logger.removeHandler(h)
+        if accelerator.is_main_process:
+            for h in list(logger.handlers):
+                try:
+                    h.flush()
+                    h.close()
+                finally:
+                    logger.removeHandler(h)
 
-        logging.shutdown()
+            logging.shutdown()
 
-    accelerator.wait_for_everyone()
+        accelerator.wait_for_everyone()
 
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        
+        break

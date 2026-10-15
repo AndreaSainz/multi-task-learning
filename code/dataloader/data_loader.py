@@ -1,4 +1,4 @@
-from torchvision.datasets import MNIST
+from torchvision.datasets import FashionMNIST
 from torch.utils.data import Dataset
 from torchvision import transforms
 import numpy as np
@@ -7,38 +7,38 @@ import random
 import torch
 
 """
-MNIST CT Dataset — Parallel-Beam Tomography
+FashionMNIST CT Dataset — Parallel-Beam Tomography
 ------------------------------------------
 
-This dataset generates simple 2D CT phantoms from MNIST digits and simulates
+This dataset generates simple 2D CT phantoms from FashionMNIST images and simulates
 their parallel-beam projections with realistic noise:
 
-1. Loads MNIST digits (train or test split).
+1. Loads FashionMNIST images (train or test split).
 2. Embeds each digit in a larger zero-padded canvas to form a 2D phantom.
-3. Applies random translations so digits appear at different positions.
-   - Optionally allows the digit to be partially outside the canvas (`cut=True`).
+3. Applies random translations so clothes appear at different positions.
+   - Optionally allows the cloth to be partially outside the canvas (`cut=True`).
 4. Uses an external tomosipo operator `A` to compute parallel-beam sinograms.
 5. Adds Poisson (photon counting) + Gaussian (detector) noise to the sinograms.
 6. Returns a dictionary with:
        - noisy_sinogram: noisy projection data
        - ground_truth_image: clean padded MNIST phantom
-       - label: original MNIST class (0–9)
-       - center: digit center coordinates in the canvas
+       - label: original FashionMNIST class (0–9)
+       - center: FashionMNIST center coordinates in the canvas
 
 """
 
-class MnistDataset(Dataset):
+class FashionMnistDataset(Dataset):
 
     def __init__(self, training, testing, A, dimension=(50, 50), num_angles=60, sigma = 0.1, i_0 = 10**5, constant = 10**2,cut = False,  seed = 29072000, max_len = None,  device="cuda"):
         """
-        Initialize the MNIST CT dataset.
+        Initialize the FashionMNIST CT dataset.
 
         Parameters
         ----------
         training : bool
-            If True, use the MNIST training split.
+            If True, use the FashionMNIST training split.
         testing : bool
-            If True, use the MNIST test split.
+            If True, use the FashionMNIST test split.
             Exactly one of (training, testing) must be True.
         A : tomosipo.Operator
             Tomosipo forward operator implementing the ray transform
@@ -46,7 +46,7 @@ class MnistDataset(Dataset):
             It is assumed to be compatible with tensors living on `device`.
         dimension : tuple[int, int], optional
             Spatial size (H, W) of the padded phantom image.
-            The MNIST digit is embedded into a canvas of this size.
+            The FashionMNIST digit is embedded into a canvas of this size.
         num_angles : int, optional
             Number of projection angles used by the CT geometry.
             (Stored for bookkeeping; the geometry is encoded in `A`.)
@@ -57,7 +57,7 @@ class MnistDataset(Dataset):
             If True, use a standard incident photon count I0 = 1e5.
             If False, reduce dose (currently I0 / 4).
         cut : bool, optional
-            Controls whether the MNIST digit is always fully contained
+            Controls whether the FashionMNIST digit is always fully contained
             in the canvas or allowed to be partially cut off:
             - False: top-left corner is restricted so that the whole digit
               lies inside the (H, W) canvas (no cropping).
@@ -97,9 +97,9 @@ class MnistDataset(Dataset):
         transform = transforms.ToTensor()
 
         if self.training:
-            self.data = MNIST(root="data", train=True, download=True, transform=transform)
+            self.data = FashionMNIST(root="data", train=True, download=True, transform=transform)
         elif self.testing:
-            self.data = MNIST(root="data", train=False, download=True, transform=transform)
+            self.data = FashionMNIST(root="data", train=False, download=True, transform=transform)
 
         # Create tomosipo volume and projection geometry
         self.A = A   
@@ -216,11 +216,11 @@ class MnistDataset(Dataset):
     
     def padding_and_translation(self,img, g):
         """
-        Embed a MNIST digit into a larger zero-padded canvas with translation.
+        Embed a FashionMNIST digit into a larger zero-padded canvas with translation.
 
         Parameters:
             img (torch.Tensor):
-                MNIST image tensor of shape (1, h, w).
+                FashionMNIST image tensor of shape (1, h, w).
             idx (int):
                 Sample index, used to generate a reproducible translation.
 
@@ -279,7 +279,7 @@ class MnistDataset(Dataset):
                 im_prim (torch.Tensor):
                     Ground-truth padded image (phantom) of shape (1, H, W).
                 label (int):
-                    Original MNIST class label (digit identity).
+                    Original FashionMNIST class label (digit identity).
                 center (tuple[int, int]):
                     Center coordinates of the digit in the padded canvas.
         """

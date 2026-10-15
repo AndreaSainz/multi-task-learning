@@ -26,8 +26,8 @@ def nfs_grad(crop_x, digit, mu_model):
             Tensor containing the digit labels corresponding to each crop.
 
         mu_model : torch.nn.Module
-            Normalizing flow model that predicts the log-density of the input
-            crop conditioned on the corresponding digit.
+            Normalizing flow model used to evaluate the log-density of each
+            input crop conditioned on its corresponding digit label.
 
     Returns
     -------
@@ -37,9 +37,10 @@ def nfs_grad(crop_x, digit, mu_model):
 
     Notes
     -----
-    The input crop is detached from the original computation graph before
-    computing the gradient. The resulting gradient is also detached from
-    the graph before being returned.
+    A detached copy of crop_x is created with gradient tracking enabled
+    before evaluating the log-density. The gradient is computed with
+    respect to this copy and detached from the computation graph before
+    being returned.
     """
 
 
@@ -55,10 +56,12 @@ def nfs_grad(crop_x, digit, mu_model):
 
     step_F = grad_F.detach()
 
+    del grad_F, F, B, log_mu, crop_req
+
     return step_F
 
 
-def cdm_grad(crop_x, digit, t_input, context_mask, fixed_noise, sqrtab, sqrtmab):
+def cdm_grad(crop_x, digit, t, t_input, context_mask, fixed_noise, sqrtab, sqrtmab, score_model):
     """
     Compute the score-based gradient of a conditional diffusion model
     with respect to the input crop.
@@ -75,18 +78,18 @@ def cdm_grad(crop_x, digit, t_input, context_mask, fixed_noise, sqrtab, sqrtmab)
             Diffusion timestep input used to condition the score model.
 
         context_mask : torch.Tensor
-            Mask controlling the conditioning information provided to the score
-            model.
+            Mask controlling the conditioning information provided to the
+            score model.
 
         fixed_noise : torch.Tensor
             Fixed Gaussian noise used to construct the noisy diffusion sample.
 
         sqrtab : torch.Tensor
-            Square root of the cumulative product of diffusion coefficients,
+            Square root of the cumulative product of the diffusion coefficients,
             indexed by the diffusion timestep.
 
         sqrtmab : torch.Tensor
-            Square root of one minus the cumulative product of diffusion
+            Square root of one minus the cumulative product of the diffusion
             coefficients, indexed by the diffusion timestep.
 
     Returns
@@ -96,27 +99,37 @@ def cdm_grad(crop_x, digit, t_input, context_mask, fixed_noise, sqrtab, sqrtmab)
 
     Notes
     -----
-    The noisy sample x_t is constructed from crop_x and fixed_noise using
-    the diffusion coefficients. The predicted noise is obtained from the
-    score model without tracking gradients. The score is then converted
-    into a gradient with respect to the crop.
+    The noisy diffusion sample is constructed from crop_x and fixed_noise
+    using the diffusion coefficients at the selected timestep. The
+    conditional diffusion model is then used to predict the noise component.
+    The predicted noise is converted into a score estimate, which is
+    negated to obtain the gradient used for the reconstruction update.
+
+    The score model evaluation is performed without gradient tracking.
     """
     
     B = crop_x.shape[0]
+
+    if digit.ndim > 1:
+        digit_class = digit.argmax(dim=1).long()
+    else:
+        digit_class = digit.long()
+
     x_t = (
         sqrtab[t].view(B, 1, 1, 1) * crop_x
         + sqrtmab[t].view(B, 1, 1, 1) * fixed_noise
     )
     with torch.no_grad():
-        eps_hat = score_model(crop_x, digit, t_input, context_mask)
+        eps_hat = score_model(crop_x, digit_class, t_input, context_mask)
     score = - eps_hat / sqrtmab[t].view(B, 1, 1, 1)
 
     grad_crop = - score
 
+    del score, x_t, B, digit_class, eps_hat
     return grad_crop
 
 
-def bayes_grad(crop_x, digit, mode, i, batch_id, gamma, class_model, den_model):
+def bayes_grad(crop_x, digit, mode, gamma, class_model, den_model):
     """
     Compute a Bayesian gradient based on classification and/or denoising
     objectives.
@@ -135,12 +148,6 @@ def bayes_grad(crop_x, digit, mode, i, batch_id, gamma, class_model, den_model):
             - "both" : use both the classification and denoising gradients.
             - "class" : use only the classification gradient.
             - "deno" : use only the denoising gradient.
-
-        i : int
-            Current iteration index.
-
-        batch_id : int
-            Index identifying the current batch.
 
         gamma : torch.Tensor or array-like
             Weighting coefficients applied to the classification and denoising
@@ -161,24 +168,30 @@ def bayes_grad(crop_x, digit, mode, i, batch_id, gamma, class_model, den_model):
 
     Notes
     -----
-    The classification gradient is computed from the log-probability of the
-    target digit after applying a log-softmax to the classifier logits.
+    The classification gradient is computed from the log-probability of
+    the target digit after applying log-softmax to the classifier logits.
 
     The denoising gradient is defined as the difference between the
     denoising model output and the input crop.
 
-    The selected gradient components are combined using the coefficients
-    specified by gamma and negated before being returned.
+    Depending on mode, the selected gradient components are combined
+    using the coefficients specified by gamma and negated before being
+    returned.
     """
 
 
     grad_classi = 0.0
     grad_deno = 0.0
 
+    if digit.ndim > 1:
+        digit_class = digit.argmax(dim=1).long()
+    else:
+        digit_class = digit.long()
+
     if mode in ["both", "class"]:
         logits = class_model(crop_x)
         log_probs = torch.log_softmax(logits, dim=1)
-        classi = log_probs.gather(1, digit.unsqueeze(1)).squeeze(1)
+        classi = log_probs.gather(1, digit_class.unsqueeze(1)).squeeze(1)
         grad_classi = torch.autograd.grad(classi.sum(), crop_x, create_graph=False)[0]
 
     if mode in ["both", "deno"]:
@@ -188,10 +201,13 @@ def bayes_grad(crop_x, digit, mode, i, batch_id, gamma, class_model, den_model):
 
     if mode == "both":
         grad_crop = - (gamma[0] * grad_classi + gamma[1] * grad_deno)
+        del grad_deno, grad_classi, logits, log_probs, classi, deno
     elif mode == "class":
         grad_crop = - (gamma[0] * grad_classi)
+        del grad_classi, logits, log_probs, classi
     elif mode == "deno":
         grad_crop = - (gamma[1] * grad_deno)
+        del grad_deno, deno
 
     return grad_crop
 
@@ -355,12 +371,13 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
     
     elif regularizer == "cdm":
         score_model = parameters["score_model"]
+        t = parameters["t"]
         t_input = parameters["t_input"]
         context_mask = parameters["context_mask"]
         fixed_noise = parameters["fixed_noise"]
         sqrtab = parameters["sqrtab"]
         sqrtmab = parameters["sqrtmab"]
-        grad_crop = gamma * (sigma_data**2) * cdm_grad(crop_x, digit, t_input, context_mask, fixed_noise, sqrtab, sqrtmab)
+        grad_crop = gamma * (sigma_data**2) * cdm_grad(crop_x, digit, t, t_input, context_mask, fixed_noise, sqrtab, sqrtmab, score_model)
 
     elif regularizer == "bayes":
         class_model = parameters["class_model"]
@@ -386,7 +403,9 @@ def update_case(x, y, A_torch, AT_torch, centre, digit, alpha, gamma, sigma_data
     # gradient step
     x = (x - grad_F).clamp(0, 1)
 
+    del grad_F, crop_x
     if if_sirt:
+
         return x, step_data
     else:
         return x, "None"

@@ -5,7 +5,7 @@ from tomosipo.torch_support import to_autograd
 import numpy as np
 import tomosipo as ts
 from torch.utils.data import DataLoader, random_split
-from code.dataloader.data_loader import MnistDataset
+from code.dataloader.data_loader import FashionMnistDataset
 from code.models.classifier import CNNClassifier
 from code.models.denoiser import ResUNetDenoiser
 from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
@@ -84,7 +84,7 @@ AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
 
 
 # Import data
-data = MnistDataset(training = True,
+data = FashionMnistDataset(training = True,
                 testing= False, 
                 A = A, 
                 dimension = (H,W), 

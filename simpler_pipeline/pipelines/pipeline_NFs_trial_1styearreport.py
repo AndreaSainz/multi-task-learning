@@ -5,7 +5,7 @@ from tomosipo.torch_support import to_autograd
 import numpy as np
 import tomosipo as ts
 from torch.utils.data import DataLoader, random_split
-from code.dataloader.data_loader import MnistDataset
+from code.dataloader.data_loader import FashionMnistDataset
 from code.models.score_unet import ContextUnet, ddpm_schedules
 from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
 from code.utils.gradients import update_case, score_centers_difussion_model

@@ -1,4 +1,4 @@
-from code.dataloader.data_loader import MnistDataset
+from code.dataloader.data_loader import FashionMnistDataset
 import numpy as np
 import torch
 from collections import Counter
@@ -9,12 +9,12 @@ import gc
 
 def import_data(training, validation, length_train, length_validation, A, num_angles, sigma_data, i_0, H, W, batch_size, seed, logger, accelerator, device):
     """
-    Create stratified PyTorch DataLoaders for the MNIST CT dataset.
+    Create stratified PyTorch DataLoaders for the FashionMNISTDataset CT dataset.
 
-    The function loads either the MNIST training or test split depending on
+    The function loads either the FashionMNIST training or test split depending on
     training, and creates a stratified subset containing
     length_train samples. The stratified split preserves the distribution
-    of the ten MNIST digit classes.
+    of the ten FashionMNIST digit classes.
 
     If both training and validation are True, an additional
     stratified subset of length_validation samples is selected from the
@@ -23,10 +23,10 @@ def import_data(training, validation, length_train, length_validation, A, num_an
     Parameters
     ----------
         training : bool
-            Determines which MNIST split is used.
+            Determines which FashionMNISTDataset split is used.
 
-            - True : use the MNIST training split.
-            - False : use the MNIST test split.
+            - True : use the FashionMNIST training split.
+            - False : use the FashionMNIST test split.
 
             Therefore, when training=False, the returned DataLoader contains
             test samples even though it is named train_dataloader.
@@ -42,7 +42,7 @@ def import_data(training, validation, length_train, length_validation, A, num_an
             Number of samples selected for the main training/test subset.
 
             The samples are selected using a stratified split based on their
-            MNIST digit labels.
+            FashionMNIST digit labels.
 
         length_validation : int
             Number of samples selected for the validation subset when
@@ -72,11 +72,11 @@ def import_data(training, validation, length_train, length_validation, A, num_an
             shuffling.
 
         logger : logging.Logger
-            Logger used to report the number of samples belonging to each MNIST
+            Logger used to report the number of samples belonging to each FashionMNIST
             digit in the selected main subset.
 
         device : str or torch.device
-            Device used by the MNIST CT dataset to generate tensors, e.g.
+            Device used by the FashionMNIST CT dataset to generate tensors, e.g.
             "cuda", "cuda:0" or "cpu".
 
     Returns
@@ -86,7 +86,7 @@ def import_data(training, validation, length_train, length_validation, A, num_an
         training=True.
 
         When training=False, this DataLoader instead contains the
-        selected samples from the MNIST test split.
+        selected samples from the FashionMNIST test split.
 
     val_dataloader : torch.utils.data.DataLoader
         DataLoader containing the validation samples. Returned only when
@@ -94,12 +94,12 @@ def import_data(training, validation, length_train, length_validation, A, num_an
 
     Notes
     -----
-    The complete MNIST split is loaded before selecting the required number
+    The complete FashionMNIST split is loaded before selecting the required number
     of samples. This ensures that the selected subset is stratified across
     all ten digit classes instead of simply taking the first
     length_train samples.
 
-    MNIST labels are accessed directly from the underlying torchvision
+    FashionMNIST labels are accessed directly from the underlying torchvision
     dataset to avoid unnecessarily generating CT projections and noisy
     sinograms when determining the class distribution.
 
@@ -109,7 +109,7 @@ def import_data(training, validation, length_train, length_validation, A, num_an
 
 
     # Import data with curstom dataloader 
-    data = MnistDataset(training = training,
+    data = FashionMnistDataset(training = training,
                     testing= not training, 
                     A = A, 
                     dimension = (H,W), 
@@ -121,7 +121,7 @@ def import_data(training, validation, length_train, length_validation, A, num_an
                     max_len = None,
                     device = device)
 
-    # get the labels from MNIST dataset directly
+    # get the labels from FashionMNIST dataset directly
     labels = np.array(data.data.targets)
 
     # Suflling and splitting for reproducibility
