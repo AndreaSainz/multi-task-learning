@@ -50,7 +50,7 @@ gamma = 5e-9
 
 
 # saving directory
-results_dir = "simpler_pipeline/Results/ExperimentsNF/bands"
+results_dir = "simpler_pipeline/Results/ExperimentsNF/bands_test"
 os.makedirs(results_dir, exist_ok=True)
 
 # logger and file names
