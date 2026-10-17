@@ -1,4 +1,5 @@
-from torchvision.datasets import FashionMNIST
+#from torchvision.datasets import FashionMNIST
+from torchvision.datasets import MNIST
 from torch.utils.data import Dataset
 from torchvision import transforms
 import numpy as np
@@ -97,9 +98,11 @@ class FashionMnistDataset(Dataset):
         transform = transforms.ToTensor()
 
         if self.training:
-            self.data = FashionMNIST(root="data", train=True, download=True, transform=transform)
+            self.data = MNIST(root="data", train=True, download=True, transform=transform)
+            #self.data = FashionMNIST(root="data", train=True, download=True, transform=transform)
         elif self.testing:
-            self.data = FashionMNIST(root="data", train=False, download=True, transform=transform)
+            self.data = MNIST(root="data", train=False, download=True, transform=transform)
+            #self.data = FashionMNIST(root="data", train=False, download=True, transform=transform)
 
         # Create tomosipo volume and projection geometry
         self.A = A   

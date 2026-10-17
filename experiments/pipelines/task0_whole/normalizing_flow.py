@@ -9,7 +9,7 @@ from code.dataloader.data_import import import_data
 from code.models.classifier import CNNClassifier
 from code.models.denoiser import ResUNetDenoiser
 from code.models.normalizing_flow import normalizing_flow_model
-from code.pipelines.pipelines import inverse_gradient_only_pipeline
+from code.pipelines.pipelines import inverse_only_pipeline
 from code.utils.image_cropping import extract_crops, insert_crop
 from code.utils.image_initilization import true_images_lines
 from code.utils.plots import images_plots, psnr_plots, ssim_plots
@@ -159,7 +159,7 @@ for batch_id, batch in enumerate(train_dataloader):
         logger.info(f"Original digit: {ground_truth_2}")
         logger.info(f"original centre: {ground_truth_3}")
 
-    images, images_SIRT, psnr_history, ssim_history = inverse_gradient_only_pipeline(input_data, x, A_torch, AT_torch, alpha, 
+    images, images_SIRT, psnr_history, ssim_history = inverse_only_pipeline(input_data, A_torch, AT_torch, alpha, 
                                                         gamma, sigma_data, R_ini, R_min, R_max, I, decay_iters, H, W, ground_truth_1, 
                                                         ground_truth_3, ground_truth_2, regularizer, batch_id, results_dir, 
                                                         name, accelerator, True, True, False, False, logger, **parameters)
@@ -241,3 +241,5 @@ for batch_id, batch in enumerate(train_dataloader):
 
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+    
+    break
