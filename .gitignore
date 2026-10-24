@@ -422,7 +422,7 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
-
+*.csv
 # Data
 data/**
 mnist_data/**
