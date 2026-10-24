@@ -115,8 +115,3 @@ for batch_id, batch in enumerate(train_dataloader):
 
     with open(log_file, "a") as f:
         f.write(f"{batch_id}\t{centre}\t{label}\n")
-
-
-
-
-    

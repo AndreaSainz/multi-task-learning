@@ -2,6 +2,7 @@
 from torchvision.datasets import MNIST
 from torch.utils.data import Dataset
 from torchvision import transforms
+from code.ct_recon.SIRT import normalization_matrices, sirt_method
 import numpy as np
 import tomosipo as ts
 import random
@@ -30,7 +31,8 @@ their parallel-beam projections with realistic noise:
 
 class FashionMnistDataset(Dataset):
 
-    def __init__(self, training, testing, A, dimension=(50, 50), num_angles=60, sigma = 0.1, i_0 = 10**5, constant = 10**2,cut = False,  seed = 29072000, max_len = None,  device="cuda"):
+    def __init__(self, training, testing, A, dimension=(50, 50), num_angles=60, sigma = 0.1, i_0 = 10**5, constant = 10**2, noisy_images=False,
+                sigma_image=0.1, sirt_images = False, sirt_iterations = 30, sirt_alpha = 1/(53.595951080322266)**2,cut = False,  seed = 29072000, max_len = None,  device="cuda"):
         """
         Initialize the FashionMNIST CT dataset.
 
@@ -81,6 +83,10 @@ class FashionMnistDataset(Dataset):
                 "You cannot be training and testing with the same dataset. "
                 "Set exactly one of (training, testing) to True."
             )
+        if self.training == self.testing:
+            raise ValueError(
+                "Exactly one of training and testing must be True."
+            )
         
         self.dimension = dimension
         self.H, self.W = self.dimension
@@ -88,6 +94,30 @@ class FashionMnistDataset(Dataset):
         self.sigma = sigma
         self.i_0 = i_0
         self.constant = constant
+
+        # for models training (noisy or sirt images)
+        self.noisy_images = noisy_images
+        self.sigma_image = sigma_image
+
+        #checking sirt_iterations is a valid value
+        if isinstance(sirt_iterations, int):
+            if sirt_iterations < 1:
+                raise ValueError("sirt_iterations must be positive")
+
+        elif isinstance(sirt_iterations, list):
+            if not sirt_iterations or any(
+                not isinstance(t, int) or t < 1 for t in sirt_iterations
+            ):
+                raise ValueError("The list should contain positive intergers")
+
+        else:
+            raise TypeError("Use a interger or a list")
+
+        self.sirt_images = sirt_images
+        self.sirt_iterations = sirt_iterations
+        self.sirt_alpha = sirt_alpha
+
+        
 
         self.cut = cut
         self.seed = seed
@@ -106,6 +136,10 @@ class FashionMnistDataset(Dataset):
 
         # Create tomosipo volume and projection geometry
         self.A = A   
+        self.AT = A.T
+
+        #normalization matrices
+        self.M ,self.D = normalization_matrices(self.A, self.AT, 1, self.H, self.W, self.num_angles, self.device)
 
     
     def __len__(self):
@@ -302,10 +336,63 @@ class FashionMnistDataset(Dataset):
         # adding noise
         noisy_sino = self.noise(sinogram, g) 
 
+        # for training models, noisy images
+        ground_truth_small = img.clone()
+
+
+        
+        # true noisy image
+        if self.noisy_images:
+            #if sigma_images is a list, we randomdly select a noise level 
+            if isinstance(self.sigma_image, (tuple, list)):
+                sigma = torch.empty(1).uniform_(
+                    self.sigma_image[0],
+                    self.sigma_image[1]
+                ).item()
+            else:
+                # if sigma is a number all images have the same gaussian noise
+                sigma = float(self.sigma_image)
+
+            # adding gaussian noise
+            noisy_ground_truth_small = (ground_truth_small + torch.randn_like(ground_truth_small) * sigma).clamp(0, 1)
+        
+        else:
+            noisy_ground_truth_small = None
+
+        # sirt image
+        if self.sirt_images:
+            #if sirt_iterations is a tuple/list we should return the iteration and  
+            x = torch.zeros(1, 1, self.H, self.W, device=self.device)
+            sirt_recon = []
+            if isinstance(self.sirt_iterations, int):
+                iters = self.sirt_iterations
+                save_iterations = []
+
+            elif isinstance(self.sirt_iterations, list):
+                iters = max(self.sirt_iterations)
+                save_iterations = list(self.sirt_iterations)
+
+            for i in range(iters):
+                x, _ = sirt_method(self.A, self.AT, x, noisy_sino, self.D, self.M, self.sirt_alpha)
+                if i in save_iterations or i == iters-1:
+                    sirt_recon.append(x.clone())
+
+        else:
+            sirt_recon = None
         
 
-        return {'mnist_image': img,
-            'noisy_sinogram': noisy_sino,  
+
+
+
+        return {
+            'mnist_image': img,
+            'noisy_ground_truth_image': noisy_ground_truth_small,
+            "sirt_reconstructions": sirt_recon,
+            'ground_truth_small': ground_truth_small,
+            'noisy_sinogram': noisy_sino,
             'ground_truth_image': im_prim,
             'label': label,
-            'centre': torch.tensor(center, dtype=torch.float32)}
+            'centre': torch.tensor(center, dtype=torch.float32)
+        }
+
+        

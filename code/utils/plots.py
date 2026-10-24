@@ -2,6 +2,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import os
+import numpy as np
 
 def get_image(data, sample):
     """
@@ -459,3 +460,40 @@ def centre_plots(results_dir, name, batch_id, centre_mse_history):
     plt.grid(True)
     plt.savefig(os.path.join(results_dir, f"{batch_id}_centre_w1_curve_{name}.png"), dpi=300, bbox_inches="tight")
     plt.close()
+
+
+
+def save_confusion_matrix(cm, digits, title, filename, results_dir):
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    ax.imshow(cm, interpolation="nearest", cmap="Blues")
+    fig.colorbar(ax.images[0], ax=ax)
+
+    ax.set(
+        xticks=np.arange(10),
+        yticks=np.arange(10),
+        xticklabels=digits,
+        yticklabels=digits,
+        xlabel="Predicted digit",
+        ylabel="True digit",
+        title=title
+    )
+
+    threshold = cm.max() / 2
+
+    for i in range(10):
+        for j in range(10):
+            ax.text(
+                j, i, str(cm[i, j]),
+                ha="center", va="center",
+                color="white" if cm[i, j] > threshold else "black"
+            )
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(results_dir, filename),
+        dpi=300,
+        bbox_inches="tight"
+    )
+    plt.close(fig)

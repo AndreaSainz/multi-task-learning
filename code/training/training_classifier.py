@@ -20,6 +20,34 @@ torch.cuda.manual_seed_all(42)
 random.seed(42)
 np.random.seed(42)
 
+
+# Change training options here.
+CONFIG = {
+    "model_name": "cnn_classifier",
+    "dataset": "MNIST",                 # MNIST | FashionMNIST
+    "save_dir": "./checkpoints/classifier",
+    "batch_size": 128,
+    "epochs": 30,
+    "learning_rate": 1e-3,
+    "weight_decay": 1e-4,
+    "num_workers": 1,
+    "seed": 42,
+    "device": "cuda",                   # falls back to CPU if unavailable
+    "noise_aware": False,
+    "input": {
+        "mode": "clean",               # clean | gaussian_fixed | gaussian_variable | sirt
+        "sigma": 0.15,                  # gaussian_fixed
+        "sigma_range": [0.0, 0.3],      # gaussian_variable; sampled per image
+        "sirt": {
+            "operator": "",       # e.g. my_project.sirt:reconstruct
+            "alpha": 1.0,
+            "steps": 50,
+            "reconstruction_steps": [10, 25, 50],  # [] means final only
+            "output_step": 50,           # used when steps list is empty
+        },
+    },
+}
+
 # PARAMETERS
 model_name = "cnn_classifier_clean1yrp"
 batch_size = 128
@@ -30,15 +58,50 @@ num_workers = 1
 device= "cuda" 
 save_dir = "./checkpoints/classifier"
 os.makedirs(save_dir, exist_ok=True)
+### data
+accelerator = Accelerator()
+device = accelerator.device
+n_train = 10
+batch_size = 1
+H = 100
+W = 100
+num_angles = 60
+angle_range = [0, np.pi]
+i_0 = 10**5
+sigma_data = 0.3
 
-# DATA
-transform = transforms.ToTensor()
+# logger and file names
+log_dir = "logs"
+name = "sirt_check"
+os.makedirs(log_dir, exist_ok=True)
 
-train_dataset = datasets.MNIST( root="./data", train=True, download=True, transform=transform )
-test_dataset = datasets.MNIST( root="./data", train=False, download=True, transform=transform )
+# saving directory
+results_dir = "experiments/Results/Checks/SIRT"
+os.makedirs(results_dir, exist_ok=True)
 
-train_loader = DataLoader( train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-test_loader = DataLoader( test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+## logger
+logger = setup_logger(log_dir, name, accelerator = accelerator)
+
+# SIRT 
+alpha = 10**4/(75.77664947509766)**2
+sirt_iter = 20
+
+
+# define CT geometry
+A = ct_operator(H, W, angle_range, num_angles, "parallel")
+A_torch  = to_autograd(A,   is_2d=True, num_extra_dims=2)
+AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
+
+
+
+def training_dataloader(mode):
+
+    if mode == "clean":
+        #train and validation dataloaders
+        train_dataloader, val_dataloader = import_data(True, True, 48000, None, A, num_angles, sigma_data, i_0, H, W, batch_size, seed, logger, accelerator, device)
+    
+    elif mode == ""
+
 
 
 
