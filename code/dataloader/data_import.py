@@ -7,7 +7,9 @@ from torch.utils.data import Subset
 from torch.utils.data import DataLoader, random_split
 import gc
 
-def import_data(training, validation, length_train, length_validation, A, num_angles, sigma_data, i_0, H, W, batch_size, seed, logger, accelerator, device):
+def import_data(training, validation, length_train, length_validation, A, num_angles, sigma_data, i_0, H, W, noisy_images,
+                sigma_image, sirt_images, sirt_iterations, sirt_alpha, batch_size, seed, 
+            logger, accelerator, device):
     """
     Create stratified PyTorch DataLoaders for the FashionMNISTDataset CT dataset.
 
@@ -116,6 +118,11 @@ def import_data(training, validation, length_train, length_validation, A, num_an
                     num_angles = num_angles, 
                     sigma = sigma_data,
                     i_0 = i_0,
+                    noisy_images=noisy_images,
+                    sigma_image=sigma_image, 
+                    sirt_images=sirt_images ,
+                    sirt_iterations=sirt_iterations, 
+                    sirt_alpha=sirt_alpha,
                     cut = False,
                     seed = seed,
                     max_len = None,

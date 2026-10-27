@@ -40,7 +40,7 @@ sigma_data = 0.3
 
 # logger and file names
 log_dir = "logs"
-name = "cnn_classifier_bigger_best_check"
+name = "cnn_classifier_mnist_clean_best"
 os.makedirs(log_dir, exist_ok=True)
 
 # saving directory
@@ -83,7 +83,7 @@ test_dataloader = DataLoader(data, batch_size=batch_size, shuffle=False)
 # LOAD CLASSIFIER 
 class_model = CNNClassifier()
 
-checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/classifier/cnn_classifier_bigger_best.pt", map_location="cpu")
+checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/classifier/cnn_classifier_mnist_clean_best.pt", map_location="cpu")
 
 if isinstance(checkpoint, dict) and "model" in checkpoint:
     class_model.load_state_dict(checkpoint["model"])

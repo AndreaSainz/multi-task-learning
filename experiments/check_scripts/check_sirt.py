@@ -33,6 +33,13 @@ angle_range = [0, np.pi]
 i_0 = 10**5
 sigma_data = 0.3
 
+# model training parameters 
+noisy_images= False
+sigma_image= False
+sirt_images= False
+sirt_iterations= False
+sirt_alpha= False
+
 # logger and file names
 log_dir = "logs"
 name = "sirt_check"
@@ -58,7 +65,8 @@ AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
 
 
 # create pytorch test dataloader
-test_dataloader = import_data(False, True, 10, None, A, num_angles, sigma_data, i_0, H, W, batch_size, seed, logger, accelerator, device)
+test_dataloader = import_data(False, True, 10, None, A, num_angles, sigma_data, i_0, H, W, noisy_images,
+                sigma_image, sirt_images, sirt_iterations, sirt_alpha, batch_size, seed, logger, accelerator, device)
 
 
 #normalization matrices

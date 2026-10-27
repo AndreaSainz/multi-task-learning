@@ -37,6 +37,12 @@ angle_range = [0, np.pi]
 i_0 = 10**5
 sigma_data = 0.3
 
+# model training parameters 
+noisy_images= False
+sigma_image= False
+sirt_images= False
+sirt_iterations= False
+sirt_alpha= False
 
 ### training parameters
 R_ini = 90
@@ -75,7 +81,8 @@ AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
 
 
 # create pytorch training dataloader
-train_dataloader = import_data(True, False, n_train, None, A, num_angles, sigma_data, i_0, H, W, batch_size, seed, logger, accelerator, device)
+train_dataloader = import_data(True, False, n_train, None, A, num_angles, sigma_data, i_0, H, W, noisy_images,
+                sigma_image, sirt_images, sirt_iterations, sirt_alpha, batch_size, seed, logger, accelerator, device)
 
 ###################################################################### Trained Classifier and Denoiser Models #####################################################################
 

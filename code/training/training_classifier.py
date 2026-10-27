@@ -1,68 +1,51 @@
 import os
-from dataclasses import dataclass
 import json
 import torch
 import math
 import random
 import numpy as np
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import torch
+import torch.nn.functional as F
+from tomosipo.torch_support import to_autograd
+from torch.utils.data import DataLoader, random_split
+from code.dataloader.data_import import import_data
 from torchvision import datasets, transforms
 from code.models.classifier import CNNClassifier
-from code.models.denoiser import ResUNetDenoiser
+from code.utils.logger import setup_logger
+from code.ct_recon.operators import ct_operator
+from code.ct_recon.SIRT import normalization_matrices, sirt_method
+from code.utils.image_cropping import extract_crops, insert_crop
+from accelerate import Accelerator
+from pathlib import Path
 import matplotlib
+import time
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # SEED
-torch.manual_seed(42)
-torch.cuda.manual_seed_all(42)
-random.seed(42)
-np.random.seed(42)
+seed = 42
+torch.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+random.seed(seed)
+np.random.seed(seed)
 
-
-# Change training options here.
-CONFIG = {
-    "model_name": "cnn_classifier",
-    "dataset": "MNIST",                 # MNIST | FashionMNIST
-    "save_dir": "./checkpoints/classifier",
-    "batch_size": 128,
-    "epochs": 30,
-    "learning_rate": 1e-3,
-    "weight_decay": 1e-4,
-    "num_workers": 1,
-    "seed": 42,
-    "device": "cuda",                   # falls back to CPU if unavailable
-    "noise_aware": False,
-    "input": {
-        "mode": "clean",               # clean | gaussian_fixed | gaussian_variable | sirt
-        "sigma": 0.15,                  # gaussian_fixed
-        "sigma_range": [0.0, 0.3],      # gaussian_variable; sampled per image
-        "sirt": {
-            "operator": "",       # e.g. my_project.sirt:reconstruct
-            "alpha": 1.0,
-            "steps": 50,
-            "reconstruction_steps": [10, 25, 50],  # [] means final only
-            "output_step": 50,           # used when steps list is empty
-        },
-    },
-}
 
 # PARAMETERS
-model_name = "cnn_classifier_clean1yrp"
+model_name = "cnn_classifier_mnist_sirt_time"
 batch_size = 128
-epochs = 30
+epochs = 1
 lr= 1e-3
 weight_decay = 1e-4
-num_workers = 1
+accelerator = Accelerator()
+num_workers = 0
 device= "cuda" 
+noise_aware = False
 save_dir = "./checkpoints/classifier"
 os.makedirs(save_dir, exist_ok=True)
+
 ### data
-accelerator = Accelerator()
-device = accelerator.device
-n_train = 10
-batch_size = 1
+n_train = 48000
 H = 100
 W = 100
 num_angles = 60
@@ -70,22 +53,25 @@ angle_range = [0, np.pi]
 i_0 = 10**5
 sigma_data = 0.3
 
+# model training parameters 
+noisy_images= False
+sigma_image= [0.1,0.4]
+sirt_images= True
+sirt_iterations = 10
+sirt_alpha= 10**4/(75.77664947509766)**2
+
+
 # logger and file names
 log_dir = "logs"
-name = "sirt_check"
+name = "classifier_training"
 os.makedirs(log_dir, exist_ok=True)
 
 # saving directory
-results_dir = "experiments/Results/Checks/SIRT"
+results_dir = "multi-task-learning/checkpoints/classifier"
 os.makedirs(results_dir, exist_ok=True)
 
 ## logger
 logger = setup_logger(log_dir, name, accelerator = accelerator)
-
-# SIRT 
-alpha = 10**4/(75.77664947509766)**2
-sirt_iter = 20
-
 
 # define CT geometry
 A = ct_operator(H, W, angle_range, num_angles, "parallel")
@@ -93,14 +79,60 @@ A_torch  = to_autograd(A,   is_2d=True, num_extra_dims=2)
 AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
 
 
+# dataloader import
+train_dataloader, val_dataloader = import_data(True, True, n_train, None, A, num_angles, sigma_data, i_0, H, W, noisy_images,
+                sigma_image, sirt_images, sirt_iterations, sirt_alpha, batch_size, seed, logger, accelerator, device)
 
-def training_dataloader(mode):
 
-    if mode == "clean":
-        #train and validation dataloaders
-        train_dataloader, val_dataloader = import_data(True, True, 48000, None, A, num_angles, sigma_data, i_0, H, W, batch_size, seed, logger, accelerator, device)
-    
-    elif mode == ""
+def get_model_input(batch):
+    """
+    Returns:
+        x: input image, shape (B, C, H, W)
+        y: classification labels, shape (B,)
+        noise_level: optional conditioning value, shape (B, 1)
+    """
+
+    y = batch["label"].long().to(device)
+
+    # Select input image
+    if noisy_images:
+        x = batch["noisy_ground_truth_image"]
+        noise_level = batch["sigma"].float().to(device)
+
+    elif sirt_images:
+        # List of tensors: one reconstruction per iteration.
+        reconstructions = batch["sirt_reconstructions"]
+
+
+        # Each tensor has shape (B, H, W) and we need (B,1,H,W).
+        x = torch.cat(
+        [
+            reconstruction.float().to(device).unsqueeze(1)
+            if reconstruction.ndim == 3
+            else reconstruction.float().to(device)
+            for reconstruction in reconstructions
+        ],
+        dim=0)
+
+        # Repeat labels for each reconstruction.
+        num_reconstructions = len(reconstructions)
+        y = y.repeat(num_reconstructions)
+
+        noise_level = None
+
+        if noise_aware:
+            iteration_levels = batch["iteration_normalized"]
+
+            levels = torch.stack([ torch.as_tensor(level, dtype=torch.float32, device=device) for level in iteration_levels])
+            noise_level = levels.reshape(-1, 1)
+
+    else:
+        x = batch["ground_truth_small"]
+        noise_level = None
+
+
+    x = x.float().to(device)
+    return x, y, noise_level
 
 
 
@@ -141,13 +173,18 @@ def save_history(history):
 
 
 # TRAINING STEP
-
 def classification_step(model, batch, loss_fn):
-    x, y = batch
-    x = x.to(device)
-    y = y.to(device)
+    t0 = time.perf_counter()
+    x, y, noise_level = get_model_input(batch)
+    t1 = time.perf_counter()
 
-    logits = model(x)
+    print(f"Tiempo get_model_input: {t1 - t0:.6f} segundos")
+
+    if noise_aware:
+        logits = model(x, noise_level=noise_level)
+    else:
+        logits = model(x)
+
     loss = loss_fn(logits, y)
 
     preds = logits.argmax(dim=1)
@@ -158,19 +195,41 @@ def classification_step(model, batch, loss_fn):
 
 # TRAIN LOOP
 def train_one_epoch(model, loader, optimizer, loss_fn):
+    
     model.train()
 
     total_loss = 0.0
     total_correct = 0
     total_samples = 0
 
-    for batch in loader:
+    iterator = iter(loader)
+
+    for batch_idx in range(len(loader)):
+        t0 = time.perf_counter()
+        batch = next(iterator)
+        t1 = time.perf_counter()
+
+        print(f"Data loading: {t1 - t0:.6f} segundos")
+
         optimizer.zero_grad()
         loss, correct, n = classification_step(model, batch, loss_fn)
         total_correct += correct
 
+        torch.cuda.synchronize()
+        t2 = time.perf_counter()
+
         loss.backward()
+
+        torch.cuda.synchronize()
+        t3 = time.perf_counter()
+
         optimizer.step()
+
+        torch.cuda.synchronize()
+        t4 = time.perf_counter()
+
+        print(f"Backward: {t3 - t2:.6f} segundos")
+        print(f"Optimizer: {t4 - t3:.6f} segundos")
 
         total_loss += loss.item() * n
         total_samples += n
@@ -178,6 +237,9 @@ def train_one_epoch(model, loader, optimizer, loss_fn):
     avg_loss = total_loss / total_samples
     avg_metric = total_correct / total_samples
 
+    t1 = time.perf_counter()
+
+    print(f"Tiempo train_one_epoch: {t1 - t0:.6f} segundos")
     return avg_loss, avg_metric
 
 
@@ -191,11 +253,14 @@ def evaluate_classifier(model, loader, loss_fn):
     total_samples = 0
 
     for batch in loader:
-        x, y = batch
-        x = x.to(device)
-        y = y.to(device)
 
-        logits = model(x)
+        x, y, noise_level = get_model_input(batch)
+
+        if noise_aware:
+            logits = model(x, noise_level=noise_level)
+        else:
+            logits = model(x)
+
         loss = loss_fn(logits, y)
 
         preds = logits.argmax(dim=1)
@@ -232,10 +297,10 @@ def train(model):
     for epoch in range(epochs):
 
         # trainig step
-        train_loss, train_metric = train_one_epoch(model, train_loader, optimizer, loss_fn)
+        train_loss, train_metric = train_one_epoch(model, train_dataloader, optimizer, loss_fn)
 
         # validation step
-        val_loss, val_acc = evaluate_classifier(model, test_loader, loss_fn)
+        val_loss, val_acc = evaluate_classifier(model, val_dataloader, loss_fn)
 
         # scheduler step
         scheduler.step()
@@ -278,6 +343,68 @@ def train(model):
 
 # MAIN
 if __name__ == "__main__":
+
+    # Training configurations
+    CONFIG = {
+        # General
+        "model_name": model_name,
+        "dataset": "MNIST",             # MNIST/FASHIONMNIST
+        "save_dir": str(save_dir),
+        "batch_size": batch_size,
+        "epochs": epochs,
+        "learning_rate": lr,
+        "weight_decay": weight_decay,
+        "seed": seed,
+        "device": str(device),
+
+        # Model
+        "noise_aware": noise_aware,
+
+        # Dataset
+        "n_train": n_train,
+        "H": H,
+        "W": W,
+
+        # CT geometry
+        "ct_geometry": "parallel",
+        "num_angles": num_angles,
+        "angle_range": angle_range,
+        "i_0": i_0,
+
+        # Noise
+        "sigma_data": sigma_data,
+
+        # Input configuration
+        "input": {
+            "noisy_images": noisy_images,
+            "sigma_image": sigma_image,
+            "sirt_images": sirt_images,
+            "sirt_iterations": sirt_iterations,
+            "sirt_alpha": sirt_alpha,
+        },
+
+        # Fine-tuning
+        "fine_tuning": {
+            "enabled": False,
+            "pretrained_checkpoint": None,
+            "parameters": {
+                "learning_rate": None,
+                "epochs": None,
+                "freeze_backbone": False,
+                "unfreeze_layers": None,
+            },
+        },
+    }
+
+    # Save configuration
+    config_path = Path(save_dir) / f"{model_name}_config.json"
+    
+
+    with config_path.open("w", encoding="utf-8") as f:
+        json.dump(CONFIG, f, indent=4, ensure_ascii=False)
+
+    print(f"Configuration saved to: {config_path}")
+
     # MODEL
-    model = CNNClassifier()
+    model = CNNClassifier(noise_aware=noise_aware).to(device)
     train(model)

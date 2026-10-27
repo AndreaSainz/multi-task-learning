@@ -2,7 +2,9 @@
 from torchvision.datasets import MNIST
 from torch.utils.data import Dataset
 from torchvision import transforms
+from tomosipo.torch_support import to_autograd
 from code.ct_recon.SIRT import normalization_matrices, sirt_method
+from code.utils.image_cropping import extract_crops, insert_crop
 import numpy as np
 import tomosipo as ts
 import random
@@ -34,47 +36,95 @@ class FashionMnistDataset(Dataset):
     def __init__(self, training, testing, A, dimension=(50, 50), num_angles=60, sigma = 0.1, i_0 = 10**5, constant = 10**2, noisy_images=False,
                 sigma_image=0.1, sirt_images = False, sirt_iterations = 30, sirt_alpha = 1/(53.595951080322266)**2,cut = False,  seed = 29072000, max_len = None,  device="cuda"):
         """
-        Initialize the FashionMNIST CT dataset.
+        Initialize the MNIST CT dataset.
 
         Parameters
         ----------
         training : bool
-            If True, use the FashionMNIST training split.
+            If True, use the MNIST training split.
         testing : bool
-            If True, use the FashionMNIST test split.
+            If True, use the MNIST test split.
             Exactly one of (training, testing) must be True.
+
         A : tomosipo.Operator
-            Tomosipo forward operator implementing the ray transform
-            (e.g. parallel-beam projections) that maps images -> sinograms.
-            It is assumed to be compatible with tensors living on `device`.
+            Tomosipo forward operator implementing the CT projection
+            process, mapping images to sinograms. The corresponding
+            adjoint operator is obtained using A.T.
+
         dimension : tuple[int, int], optional
-            Spatial size (H, W) of the padded phantom image.
-            The FashionMNIST digit is embedded into a canvas of this size.
+            Spatial dimensions (H, W) of the padded phantom image.
+            MNIST images are embedded into a zero-filled canvas of
+            this size. Default is (50, 50).
+
         num_angles : int, optional
-            Number of projection angles used by the CT geometry.
-            (Stored for bookkeeping; the geometry is encoded in `A`.)
+            Number of projection angles used to construct the CT
+            geometry. This value is used when computing the SIRT
+            normalization matrices. Default is 60.
+
         sigma : float, optional
-            Standard deviation of the additive Gaussian detector noise
-            applied on top of the Poisson log-domain sinogram.
-        standard_dose : bool, optional
-            If True, use a standard incident photon count I0 = 1e5.
-            If False, reduce dose (currently I0 / 4).
+            Standard deviation of the additive Gaussian noise applied
+            to the sinogram after simulating Poisson photon-counting
+            noise. Default is 0.1.
+
+        i_0 : float, optional
+            Incident photon count used in the Poisson noise model.
+            Higher values correspond to lower relative photon-counting
+            noise. Default is 10**5.
+
+        constant : float, optional
+            Additional constant parameter stored by the dataset.
+            Default is 10**2.
+
+        noisy_images : bool, optional
+            If True, generate noisy versions of the original 28x28
+            MNIST images by adding Gaussian noise. Default is False.
+
+        sigma_image : float or tuple/list of float, optional
+            Standard deviation of the Gaussian noise added to the
+            original MNIST images when noisy_images=True.
+            If a single value is provided, it is used for every image.
+            If a tuple or list is provided, the intended behaviour is
+            to sample a noise level from the specified range.
+            Default is 0.1.
+
+        sirt_images : bool, optional
+            If True, compute and return SIRT reconstructions from the
+            noisy sinograms. Default is False.
+
+        sirt_iterations : int or list of int, optional
+            Number of SIRT iterations to perform.
+            If an integer is provided, return a reconstruction after
+            that number of iterations.
+            If a list is provided, return reconstructions after each
+            specified iteration count. All iteration counts must be
+            positive integers. Default is 30.
+
+        sirt_alpha : float, optional
+            Relaxation parameter used by the SIRT reconstruction
+            algorithm. Default is 1/(53.595951080322266)**2.
+
         cut : bool, optional
-            Controls whether the FashionMNIST digit is always fully contained
-            in the canvas or allowed to be partially cut off:
-            - False: top-left corner is restricted so that the whole digit
-              lies inside the (H, W) canvas (no cropping).
-            - True: the top-left corner is sampled anywhere in the canvas,
-              so parts of the digit may fall outside and be cropped.
+            If False, place each MNIST image entirely inside the
+            padded canvas.
+            If True, allow the image to extend beyond the canvas
+            boundaries, so that part of the image may be cropped.
+            Default is False.
+
         seed : int, optional
-            Base random seed (currently not used inside the class; global
-            seeding is expected to be handled outside for reproducibility).
+            Base random seed used to generate reproducible random
+            translations and noise. The random generator for each
+            sample is initialized using seed + idx. Default is 29072000.
+
         max_len : int or None, optional
-            If not None, cap the dataset length to `max_len` samples.
+            Maximum number of samples in the dataset. If None, use
+            the full length of the selected MNIST split. Default is None.
+
         device : str or torch.device, optional
-            Target device for tensors produced by the dataset
-            (e.g. "cuda", "cuda:0", or "cpu").
+            Device on which image tensors and reconstruction-related
+            computations are performed, such as "cuda" or "cpu".
+            Default is "cuda".
         """
+
         self.training = training
         self.testing = testing
 
@@ -95,24 +145,52 @@ class FashionMnistDataset(Dataset):
         self.i_0 = i_0
         self.constant = constant
 
+       
+
+        # checking sigma_image is valid 
+        if noisy_images:
+            if isinstance(sigma_image, (int, float)):
+                if sigma_image < 0:
+                    raise ValueError("sigma_image must be non-negative")
+
+            elif isinstance(sigma_image, (tuple, list)):
+                if len(sigma_image) != 2:
+                    raise ValueError("sigma_image must contain exactly 2 values")
+
+                if not all(isinstance(s, (int, float)) for s in sigma_image):
+                    raise TypeError("sigma_image values must be numbers")
+
+                if any(s < 0 for s in sigma_image):
+                    raise ValueError("sigma_image values must be non-negative")
+
+                sigma_image = sorted(sigma_image)
+
+            else:
+                raise TypeError(
+                    "sigma_image must be a number or a tuple/list of 2 numbers"
+                )
+
+
+        #checking sirt_iterations is a valid value
+        if sirt_images:
+            if isinstance(sirt_iterations, int):
+                if sirt_iterations < 1:
+                    raise ValueError("sirt_iterations must be positive")
+
+            elif isinstance(sirt_iterations, list):
+                if not sirt_iterations or any(not isinstance(t, int) or t < 1 for t in sirt_iterations):
+                    raise ValueError("The list should contain positive intergers")
+            
+            elif isinstance(sirt_iterations, tuple):
+                if (len(sirt_iterations) != 2 or any(not isinstance(t, int) or t < 1 for t in sirt_iterations) or sirt_iterations[0] > sirt_iterations[1]):
+                    raise ValueError("The tuple must contain (min, max) positive integers, with min <= max")
+
+            else:
+                raise TypeError("Use a interger or a list")
+
         # for models training (noisy or sirt images)
         self.noisy_images = noisy_images
         self.sigma_image = sigma_image
-
-        #checking sirt_iterations is a valid value
-        if isinstance(sirt_iterations, int):
-            if sirt_iterations < 1:
-                raise ValueError("sirt_iterations must be positive")
-
-        elif isinstance(sirt_iterations, list):
-            if not sirt_iterations or any(
-                not isinstance(t, int) or t < 1 for t in sirt_iterations
-            ):
-                raise ValueError("The list should contain positive intergers")
-
-        else:
-            raise TypeError("Use a interger or a list")
-
         self.sirt_images = sirt_images
         self.sirt_iterations = sirt_iterations
         self.sirt_alpha = sirt_alpha
@@ -135,11 +213,11 @@ class FashionMnistDataset(Dataset):
             #self.data = FashionMNIST(root="data", train=False, download=True, transform=transform)
 
         # Create tomosipo volume and projection geometry
-        self.A = A   
-        self.AT = A.T
+        self.A = to_autograd(A,   is_2d=True, num_extra_dims=1)  
+        self.AT = to_autograd(A.T, is_2d=True, num_extra_dims=1)
 
         #normalization matrices
-        self.M ,self.D = normalization_matrices(self.A, self.AT, 1, self.H, self.W, self.num_angles, self.device)
+        self.M ,self.D = normalization_matrices(self.A, self.AT, 1, self.H, self.W, self.num_angles, self.device, num_extra_dims=1)
 
     
     def __len__(self):
@@ -320,6 +398,10 @@ class FashionMnistDataset(Dataset):
                 center (tuple[int, int]):
                     Center coordinates of the digit in the padded canvas.
         """
+        sigma = 0.0
+        iteration_normalized = None
+
+
         g = torch.Generator(device=self.device)
         g.manual_seed(self.seed + int(idx))
 
@@ -338,47 +420,83 @@ class FashionMnistDataset(Dataset):
 
         # for training models, noisy images
         ground_truth_small = img.clone()
-
+        noisy_ground_truth_small = img.clone()
 
         
         # true noisy image
         if self.noisy_images:
             #if sigma_images is a list, we randomdly select a noise level 
             if isinstance(self.sigma_image, (tuple, list)):
-                sigma = torch.empty(1).uniform_(
-                    self.sigma_image[0],
-                    self.sigma_image[1]
-                ).item()
+                sigma = torch.empty(1).uniform_(self.sigma_image[0],self.sigma_image[1]).item()
             else:
                 # if sigma is a number all images have the same gaussian noise
                 sigma = float(self.sigma_image)
 
             # adding gaussian noise
-            noisy_ground_truth_small = (ground_truth_small + torch.randn_like(ground_truth_small) * sigma).clamp(0, 1)
+            noisy_ground_truth_small = (noisy_ground_truth_small + torch.randn_like(ground_truth_small) * sigma).clamp(0, 1)
+
+
+            return {
+                'mnist_image': img,
+                'noisy_ground_truth_image': noisy_ground_truth_small,
+                "sigma": sigma,
+                'ground_truth_small': ground_truth_small,
+                'noisy_sinogram': noisy_sino,
+                'ground_truth_image': im_prim,
+                'label': label,
+                'centre': torch.tensor(center, dtype=torch.float32)
+            }
         
-        else:
-            noisy_ground_truth_small = None
 
         # sirt image
         if self.sirt_images:
             #if sirt_iterations is a tuple/list we should return the iteration and  
-            x = torch.zeros(1, 1, self.H, self.W, device=self.device)
+            x = torch.zeros(1, self.H, self.W, device=self.device)
             sirt_recon = []
             if isinstance(self.sirt_iterations, int):
                 iters = self.sirt_iterations
+                iteration_normalized = 1.0
                 save_iterations = []
 
             elif isinstance(self.sirt_iterations, list):
                 iters = max(self.sirt_iterations)
+                iteration_normalized = [ i / iters for i in self.sirt_iterations]
                 save_iterations = list(self.sirt_iterations)
 
-            for i in range(iters):
-                x, _ = sirt_method(self.A, self.AT, x, noisy_sino, self.D, self.M, self.sirt_alpha)
-                if i in save_iterations or i == iters-1:
-                    sirt_recon.append(x.clone())
+            elif isinstance(self.sirt_iterations, tuple):
+                min_iter, max_iter = self.sirt_iterations
 
-        else:
-            sirt_recon = None
+                iters = max_iter
+
+                # Always include the first and last iteration
+                save_iterations = [min_iter, max_iter]
+
+                # Randomly select 3 additional iterations
+                available_iterations = list(range(min_iter + 1, max_iter))
+
+                random_iterations = random.sample(available_iterations, min(3, len(available_iterations)))
+
+                save_iterations.extend(random_iterations)
+                save_iterations = sorted(set(save_iterations))
+
+                iteration_normalized = [i / iters for i in save_iterations]
+
+            for i in range(1, iters+1):
+                x, _ = sirt_method(self.A, self.AT, x, noisy_sino, self.D, self.M, self.sirt_alpha)
+                if i in save_iterations or i == iters:
+                    x_crop = extract_crops(x, center)
+                    sirt_recon.append(x_crop.squeeze(0).clone())
+
+            return {
+                'mnist_image': img,
+                "sirt_reconstructions": sirt_recon,
+                "iteration_normalized": iteration_normalized,
+                'ground_truth_small': ground_truth_small,
+                'noisy_sinogram': noisy_sino,
+                'ground_truth_image': im_prim,
+                'label': label,
+                'centre': torch.tensor(center, dtype=torch.float32)
+            }
         
 
 
@@ -386,8 +504,6 @@ class FashionMnistDataset(Dataset):
 
         return {
             'mnist_image': img,
-            'noisy_ground_truth_image': noisy_ground_truth_small,
-            "sirt_reconstructions": sirt_recon,
             'ground_truth_small': ground_truth_small,
             'noisy_sinogram': noisy_sino,
             'ground_truth_image': im_prim,

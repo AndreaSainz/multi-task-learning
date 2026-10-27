@@ -13,7 +13,7 @@ def extract_crops(x, centre):
     Parameters
     ----------
         x : torch.Tensor
-            Batch of input images with shape ``(B, 1, H, W)``.
+            Batch of input images with shape ``(B, 1, H, W) or (B, H, W)``.
 
         centre : torch.Tensor
             Tensor containing the center coordinates of each image with shape
@@ -31,13 +31,34 @@ def extract_crops(x, centre):
     The crop is centered at the provided coordinates and extends 14 pixels
     in each direction, resulting in a 28x28 image.
     """
+    
+    dims = x.ndim
+    # If x has shape (B, H, W), add channel dimension
+    if dims == 3:
+        x = x.unsqueeze(1)
 
-    B = x.shape[0]
-    crops = torch.zeros(B, 1, 28, 28, device=x.device, dtype=x.dtype)
+    elif dims != 4:
+        raise ValueError(
+            f"x must have 3 or 4 dimensions, but got {dims}"
+        )
+
+
+    B, C, H, W = x.shape
+    crops = torch.zeros(B, C, 28, 28, device=x.device, dtype=x.dtype)
+
+    # Convert tuple to tensor if necessary
+    if isinstance(centre, tuple):
+        centre = torch.tensor( centre, device=x.device).unsqueeze(0).expand(B, -1)
+
+
     for b in range(B):
         cy = int(centre[b, 0].item())
         cx = int(centre[b, 1].item())
         crops[b:b+1] = x[b:b+1, :, cy-14:cy+14, cx-14:cx+14]
+
+    if dims == 3:
+        crops = crops.squeeze(0)
+
     return crops
 
 
