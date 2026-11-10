@@ -2,248 +2,338 @@
 
 import torch
 import torch.nn.functional as F
-from accelerate import Accelerator
-from tomosipo.torch_support import to_autograd
 import numpy as np
 import tomosipo as ts
-from torch.utils.data import DataLoader, random_split
-from code.dataloader.data_loader import FashionMnistDataset
-from code.models.score import score_model
+import math
+import logging
+import os
+import random
+from accelerate import Accelerator
+from tomosipo.torch_support import to_autograd
+from code.ct_recon.operators import ct_operator
+from code.utils.logger import setup_logger
+from code.dataloader.data_import import import_data
+from code.models.score_unet import ContextUnet, ddpm_schedules
+from code.ct_recon.SIRT import normalization_matrices, sirt_method
 from code.utils.metrics import compute_psnr_results, compute_ssim, compute_mse, update_confusion_matrix, metrics_from_confusion_matrix
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import math
-import logging
-import os
-from torch.utils.data import Subset
-import normflows as nf
-from collections import Counter
-from sklearn.model_selection import train_test_split
-from torch.utils.data import Subset
+import optuna
+import pandas as pd
 
-
+torch.backends.cudnn.enabled = False
 seed = 29072000
-import random
 random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
 
 ###################################################################### Parameters #####################################################################
 
 ### data
+accelerator = Accelerator()
+device = accelerator.device
+n_train = 100
+n_val = 30
+batch_size = 10
+B = batch_size
 seed = 29072000
-# I don't want a bigger image right now
 H = 28
 W = 28
 num_angles = 60 #30
+angle_range = [0, np.pi]
 i_0 = 10**5
 sigma_data = 0.3
-patch = 28
-rad = patch // 2
-ymin, ymax = rad, H - rad - 1
-xmin, xmax = rad, W - rad - 1
 
 
-### training parameters
-T_ini = 80
-T_max = 70
-T_min = 70
-decay_iters = 70
-I = 10
-tol_dx = 1e-3
-patience_dx = 3
-alpha = 2e-1/(75.776649475097666)**2 #1/(liptchitz constant)^2. .  53.595951080322266
-beta1 = [8e-2, 8e-2] #[1e-2, 1e-2]
-beta2 = [5e-2, 5e-2] #[5e-2, 5e-2] #[5e-4, 5e-3] 
-alpha_img = 0.01
-accelerator = Accelerator()
-device = accelerator.device
-n_train = 10
-batch_size = 1
-save_batch_id = 0
-topk_digits = 5184
-results_dir = "simpler_pipeline/Results/ExperimentsClassDeno/Experiments4/60_angles_sigma_0.3"
+
+
+
+#saving results
+results_dir = "experiments/Results/DPS"
+
+
+###################################################################### Logger ##################################################################
+# create logger for checkpoints
+log_dir = "logs"
+name = "DPS"
+logger = setup_logger(log_dir, name, accelerator = accelerator)
 
 
 ###################################################################### Data #####################################################################
 
 # define CT geometry
-vg = ts.volume(shape=(1,H,W))                                 # Volume
-angles = np.linspace(0, np.pi, num_angles, endpoint=True)     # Angles
-pg = ts.parallel(angles=angles, shape=(1, H))                 # Parallel beam structure
-A = ts.operator(vg,pg)
-
-
+A = ct_operator(H, W, angle_range, num_angles, "parallel")
 A_torch  = to_autograd(A,   is_2d=True, num_extra_dims=2)
 AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
 
 
-# Import data
-data = FashionMnistDataset(training = True,
-                testing= False, 
-                A = A, 
-                dimension = (H,W), 
-                num_angles = num_angles, 
-                sigma = sigma_data,
-                i_0 = i_0,
-                cut = False,
-                seed = seed,
-                max_len = None,
-                device = device)
-
-#for reproducibility
-g_split = torch.Generator()
-g_split.manual_seed(seed)
-labels = np.array([data[i]["label"] for i in range(len(data))])
-
-# Split estratificado
-train_idx, val_idx = train_test_split(
-    np.arange(len(data)),
-    train_size=n_train,
-    stratify=labels,
-    random_state=seed
-)
-
-train_data = Subset(data, train_idx)
-
-
-# create dataloader
-train_dataloader = DataLoader(
-    train_data,
-    batch_size=batch_size,
-    shuffle=True,
-    generator=g_split)
-
-
-###################################################################### Logger #####################################################################
-# create logger for checkpoints
-log_dir = "logs"
-name = "60_angles_sigma_0.3_lines"
-
-os.makedirs(log_dir, exist_ok=True)
-handlers = [logging.StreamHandler()]
-if accelerator.is_main_process:
-    handlers.insert(0, logging.FileHandler(os.path.join(log_dir, f"{name}.log")))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=handlers
-)
-
-logger = logging.getLogger(__name__)
+# create pytorch training dataloader
+train_dataloader, val_dataloader = import_data(True, True, n_train, n_val, A, num_angles, sigma_data, i_0, H, W, False,False,False,False,False,
+                     batch_size , seed, logger, accelerator , device)
 
 
 
-
-#Check if the dataset is balanced
-labels_bal = torch.tensor([train_data[i]["label"] for i in range(len(train_data))])
-counts = torch.bincount(labels_bal, minlength=10)
-
-if accelerator.is_main_process:
-    logger.info("Balanced dataset label counts:")
-    for d in range(10):
-        logger.info(f"Digit {d}: {counts[d].item()}")
+################################################################## Trained score model ############################################################
+score_model = ContextUnet(in_channels=1, n_feat=128, n_classes=10)
 
 
-###################################################################### Trained score model ######################################################################
-score = score_model(in_channels=1, n_feat=128)
-
-
-checkpoint = torch.load(".pth", map_location="cpu")
-alpha_t = checkpoint["alpha_t"]
+checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/diffusion_model/model_39.pth", map_location="cpu")
+alpha_t = checkpoint["alpha_t"].to(device)
 beta_t = 1 - alpha_t
+T = len(beta_t) - 1
+I = T
+alphabar_t = checkpoint["alphabar_t"].to(device) # \bar{\alpha_t}
+sqrtab = checkpoint["sqrtab"].to(device) # \sqrt{\bar{\alpha_t}}
+sqrtmab = checkpoint["sqrtmab"].to(device) # \sqrt{1-\bar{\alpha_t}}
 
 model_state = {
     k.replace("nn_model.", ""): v
     for k, v in checkpoint.items()
     if k.startswith("nn_model.")
 }
-score.load_state_dict(model_state)
+score_model.load_state_dict(model_state)
+score_model = score_model.to(device)
 
 # model in evaluation mode, we don't want to train it
-score.eval() 
-for p in score.parameters():
+score_model.eval() 
+for p in score_model.parameters():
    p.requires_grad_(False)
 
-
 # for using the score
-t_input = t.float().view(batch_size, 1) / T_max
-fixed_noise = torch.randn((batch_size, 1 , 28, 28), device=device)
-context_mask = torch.zeros(batch_size, device=device) #we want to use the condition
-
-score_model, train_dataloader = accelerator.prepare(score, train_dataloader)
+context_mask_cond = torch.zeros(batch_size, device=device) #we want to use the condition
+context_mask = torch.ones(batch_size, device=device)
 
 
 
+###################################################################### DPS Algo #####################################################################
 
-def DPS(y):
+# normlizing matrices
+M , D = normalization_matrices(A, A.T, 1, H, W, num_angles, device, num_extra_dims=1)
+zeta_scale = 0.09295959900229107
+sigma_scale = 0.08684175776720753
+
+def DPS(y, digit_class, I, batch_id): #, zeta_scale, sigma_scale):
+    #hyperparameters
+    zeta_schedule = torch.linspace(0.0, zeta_scale, I)
+    sigma_schedule = torch.linspace(0.0, sigma_scale, I)
+
     B = y.shape[0]
     device = y.device
     
     # initilize the image
     x = torch.randn((B, 1, 28, 28), device=device)
 
-    # diffusion coefficients
-    alpha_bar = torch.cumprod(alpha_t, dim=0)
-
-
     #DPS 
-    for i in reversed(range(N)):
+    for i in reversed(range(0, I)):
 
         if i > 0:
-            alpha_bar_prev = alpha_bar[i - 1]
+            alpha_bar_prev = alphabar_t[i - 1]
         else:
-            alpha_bar_prev = torch.ones_like(alpha_bar[i])
+            alpha_bar_prev = torch.ones_like(alphabar_t[i])
+
+        t_input = torch.full((B,), (i+1)/T, device=device, dtype=torch.float32)
 
         # score value for x_i in time i
         x = x.detach().requires_grad_(True)
-        score_value = score_model(x, i)
+        eps_hat = score_model(x, digit_class, t_input, context_mask)
+        score_value = - eps_hat / sqrtmab[i]
 
         # new image based on the diffusion process (clean image)
-        x_0 = (alpha_bar[i])**(-0.5)*(x + (1-alpha_bar[i])*score_value)
+        x_0 = (x + (1-alphabar_t[i])*score_value)/sqrtab[i]
 
         # random noise (same size as images)
-        z = torch.randn((B, 1, 28, 28), device=device)
+        z = torch.randn_like(x)
 
-        # posterior mean
-        x_1 = (((alpha_t[i])**(0.5))*(1-alpha_bar_prev)/(1-alpha_bar[i])) * x + (((alpha_bar_prev)**(0.5))*beta_t[i]/(1-alpha_bar[i])) * x_0 + sigmas[i]*z
+        # posterior mean (last value of sigma should be 0)
+        x_1 = (((alpha_t[i])**(0.5))*(1-alpha_bar_prev)/(1-alphabar_t[i])) * x + (torch.sqrt(alpha_bar_prev)*beta_t[i]/(1-alphabar_t[i])) * x_0 + sigma_schedule[i]*z
+        
 
         # Reconstruction step (make sure the image looks similar to the data)
-        y_pred = A_torch(x_0)
-        loss = torch.sum((y - y_pred)**2)
-        grad = torch.autograd.grad(outputs=loss,inputs=x)[0]
+        ## y_pred = A_torch(x_0)
+        ## loss = (0.5 / sigma_data**2)*torch.sum((y - y_pred)**2)
+        ## grad = torch.autograd.grad(outputs=loss, inputs=x)[0]
 
-        x = x_1 - zetas[i]*grad
+        _ , grad = sirt_method(A_torch, AT_torch, x_0, y, D, M, zeta_schedule[i])
+        x = x_1 + grad
+        
+
+        if batch_id <2 and i%50 == 0:
+            # Save batch reconstructions as a grid
+            B = len(x)
+
+            ncols = int(np.ceil(np.sqrt(B)))
+            nrows = int(np.ceil(B / ncols))
+
+            fig = plt.figure(figsize=(ncols * 1.5 + 0.4, nrows * 1.5),constrained_layout=True)
+            gs = fig.add_gridspec( nrows, ncols + 1, width_ratios=[1] * ncols + [0.04])
+
+            # Create image axes
+            axes = [ fig.add_subplot(gs[r, c]) for r in range(nrows) for c in range(ncols)]
+
+            # Common colorbar axis
+            cax = fig.add_subplot(gs[:, -1])
+
+            # Plot images
+            for j in range(B):
+                img = x[j].detach().cpu().squeeze().numpy()
+                im = axes[j].imshow(img,cmap="gray",vmin=0,vmax=1,interpolation="nearest")
+                axes[j].axis("off")
+
+            # Hide unused axes
+            for j in range(B, len(axes)):
+                axes[j].axis("off")
+
+            # Shared colorbar
+            fig.colorbar(im, cax=cax)
+            fig.savefig(os.path.join( results_dir, f"unconditional_reconstruction_batch_{batch_id}_iter_{i}.png"),dpi=200,bbox_inches="tight",pad_inches=0.05)
+            plt.close(fig)
 
     return x.detach()
 
 
-
-
-
-# for loop for data in dataloader
-
+# for loop for data in dataloader 
 recon_images = []
 gt_images = []
 
 for batch_id, batch in enumerate(train_dataloader):
 
     ground_truth_1 = batch["ground_truth_image"].to(device)
+    img_true = ground_truth_1.detach().cpu()
     input_data = batch["noisy_sinogram"].to(device)
+    labels = batch["label"].to(device)
 
-    x = DPS(input_data)
+    x = DPS(input_data, labels, I, batch_id)
 
-    if accelerator.is_main_process and batch_id ==0: 
-        for b in range(B):
-            gt_images.append(ground_truth_1[b].detach().cpu())
-            recon_images(x[b].detach().cpu())
-    else: 
-        break
+    # Save batch true_images as a grid
+    B = len(x)
+
+    ncols = int(np.ceil(np.sqrt(B)))
+    nrows = int(np.ceil(B / ncols))
+
+    fig = plt.figure(figsize=(ncols * 1.5 + 0.4, nrows * 1.5),constrained_layout=True)
+
+    gs = fig.add_gridspec( nrows, ncols + 1, width_ratios=[1] * ncols + [0.04])
+
+    # Create image axes
+    axes = [ fig.add_subplot(gs[r, c]) for r in range(nrows) for c in range(ncols)]
+
+    # Common colorbar axis
+    cax = fig.add_subplot(gs[:, -1])
+
+    # Plot images
+    for j in range(B):
+        img = img_true[j].detach().cpu().squeeze().numpy()
+
+        im = axes[j].imshow(img,cmap="gray",vmin=0,vmax=1,interpolation="nearest")
+
+        axes[j].axis("off")
+
+    # Hide unused axes
+    for j in range(B, len(axes)):
+        axes[j].axis("off")
+
+    # Shared colorbar
+    fig.colorbar(im, cax=cax)
+
+    fig.savefig(os.path.join( results_dir, f"true_images_batch_{batch_id}.png"),dpi=200,bbox_inches="tight",pad_inches=0.05)
+
+    plt.close(fig)
+    
+
+    # if accelerator.is_main_process and batch_id<2: 
+    #     for b in range(B):
+    #         recon = x[b].detach().cpu()
+    #         img_true = ground_truth_1[b].detach().cpu()
+            
+    #         # Save reconstruction as image
+    #         fig, ax = plt.subplots(1, 2, figsize=(15, 5))
+    #         im0 = ax[0].imshow(recon.squeeze().numpy(), cmap="gray", vmin=0, vmax=1)
+    #         ax[0].set_title("recon DPS")
+    #         ax[0].axis("off")
+
+    #         im1 = ax[1].imshow(img_true.squeeze().numpy(), cmap="gray", vmin=0, vmax=1)
+    #         ax[1].set_title("Ground Truth")
+    #         ax[1].axis("off")
+
+    #         # Shared colorbar
+    #         fig.colorbar(im0, ax=ax, fraction=0.046, pad=0.04)
+
+    
+    #         plt.savefig(os.path.join(results_dir, f"reconstruction_DPS_{b}.png"),bbox_inches="tight",pad_inches=0)
+    #         plt.close()
+
+    #         # Metrics
+    #         mse = compute_mse(recon, img_true)
+    #         psnr = compute_psnr_results(recon, img_true)
+    #         ssim = compute_ssim(recon, img_true, 1.0)
+
+    #         print(f"mse {b}: {mse}")
+    #         print(f"psnr {b}: {psnr}")
+    #         print(f"ssim {b}: {ssim}")
+    #         gt_images.append(img_true)
+    #         recon_images.append(recon)
+    # else: 
+    #     break
+
+
+
+
+
+# def objective(trial):
+
+#     zeta_scale = trial.suggest_float("zeta_scale",1e-7,1e-1,log=True)
+
+#     sigma_scale = trial.suggest_float("sigma_scale",1e-3,1.0,log=True)
+
+#     ssim_values = []
+
+#     # Use the same validation samples in every trial
+#     for batch_id, batch in enumerate(val_dataloader):
+
+#         input_data = batch["noisy_sinogram"].to(device)
+#         ground_truth = batch["ground_truth_image"].to(device)
+#         labels = batch["label"].to(device)
+
+#         # Use the same random seed for every trial
+#         torch.manual_seed(seed + batch_id)
+
+#         recon = DPS(input_data,labels,I,zeta_scale,sigma_scale)
+
+#         ssim = compute_ssim(recon.detach().cpu(),ground_truth.detach().cpu(),1.0)
+
+#         # Store individual SSIM values
+#         ssim_values.extend(torch.as_tensor(ssim).detach().cpu().reshape(-1).tolist())
+
+#     # Mean SSIM over the entire validation dataset
+#     mean_ssim = np.mean(ssim_values)
+
+#     return mean_ssim
+
+# study = optuna.create_study(
+#     direction="maximize",
+#     study_name="DPS_hyperparameter_search"
+# )
+
+# study.optimize(
+#     objective,
+#     n_trials=30
+# )
+
+# print("Best parameters:")
+# print(study.best_params)
+
+# print("Best SSIM:")
+# print(study.best_value)
+
+# results_df = study.trials_dataframe()
+
+# results_df.to_csv(
+#     os.path.join(results_dir, "optuna_results.csv"),
+#     index=False
+# )
+
+# print("Best parameters:", study.best_params)
+

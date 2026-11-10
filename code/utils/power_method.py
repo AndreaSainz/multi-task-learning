@@ -7,7 +7,7 @@ import numpy as np
 seed = 29072000
 H = 28
 W = 28
-num_angles = 60
+num_angles = 30
 i_0 = 10**5
 sigma_data = 0.1
 

@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 import pandas as pd
+from pathlib import Path
+import json
 from accelerate import Accelerator
 from tomosipo.torch_support import to_autograd
 import numpy as np
@@ -27,20 +29,41 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 seed = 29072000
 torch.manual_seed(0)
 
+# Model name
+model_name = "cnn_classifier_mnist_noisy_noiseaware_best"
+
+# Directories
+checkpoint_dir = Path("checkpoints/classifier")
+
+# Paths
+checkpoint_path = checkpoint_dir / f"{model_name}.pt"
+config_path = checkpoint_dir / f"{model_name.replace('_best', '')}_config.json"
+
+# Load configuration
+with open(config_path, "r") as f:
+    config = json.load(f)
+
+# Load checkpoint
+checkpoint = torch.load(checkpoint_path,map_location="cpu")
+
+
 ### data
 accelerator = Accelerator()
 device = accelerator.device
 batch_size = 50
-H = 100
-W = 100
-num_angles = 60
-angle_range = [0, np.pi]
-i_0 = 10**5
-sigma_data = 0.3
+H = config["H"]
+W = config["W"]
+num_angles = config["num_angles"]
+i_0 = config["i_0"]
+sigma_data = config["sigma_data"]
+angle_range = config["angle_range"]
+noise_aware = config["noise_aware"]
+
+
 
 # logger and file names
 log_dir = "logs"
-name = "cnn_classifier_mnist_clean_best"
+name = "cnn_classifier_mnist_noisy_noiseaware_best_check"
 os.makedirs(log_dir, exist_ok=True)
 
 # saving directory
@@ -51,8 +74,8 @@ os.makedirs(results_dir, exist_ok=True)
 logger = setup_logger(log_dir, name, accelerator = accelerator)
 
 # SIRT 
-alpha = 10**4/(75.77664947509766)**2
-sirt_iter = 20
+sirt_alpha = 10**4/(75.77664947509766)**2
+sirt_iterations = 20
 
 
 # define CT geometry
@@ -64,26 +87,17 @@ AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
 
 # create pytorch test dataloader
 # Import data with curstom dataloader 
-data = FashionMnistDataset(training = False,
-               testing= True, 
-               A = A, 
-               dimension = (H,W), 
-               num_angles = num_angles, 
-               sigma = sigma_data,
-               i_0 = i_0,
-               cut = False,
-               seed = seed,
-               max_len = None,
-               device = device)
+data = FashionMnistDataset(training = False, testing= True, A = A, dimension = (H,W), 
+    num_angles = num_angles, sigma = sigma_data,i_0 = i_0, sirt_images = True, 
+    sirt_iterations = sirt_iterations, sirt_alpha = sirt_alpha,seed = seed,device = device)
 
+    
 test_dataloader = DataLoader(data, batch_size=batch_size, shuffle=False)
 
 
 
 # LOAD CLASSIFIER 
-class_model = CNNClassifier()
-
-checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/classifier/cnn_classifier_mnist_clean_best.pt", map_location="cpu")
+class_model = CNNClassifier(noise_aware=noise_aware)
 
 if isinstance(checkpoint, dict) and "model" in checkpoint:
     class_model.load_state_dict(checkpoint["model"])
@@ -97,9 +111,6 @@ for p in class_model.parameters():
 class_model = class_model.to("cuda")
 
 
-#normalization matrices
-M , D = normalization_matrices(A_torch, AT_torch, batch_size, H, W, num_angles, device)
-
 
 y_true_all = []
 y_pred_clean_all = []
@@ -108,39 +119,41 @@ y_pred_sirt_all = []
 #for loop
 for batch_id, batch in enumerate(test_dataloader):
 
-   ground_truth_1 = batch["ground_truth_image"]
-   labels = batch["label"]
-   ground_truth_3 = batch["centre"]
-   input_data = batch["noisy_sinogram"]
-
-   # CT reconstruction
-   x = torch.zeros(batch_size, 1, H, W, device=device)
-
-   for i in range(sirt_iter):
-      x, _ = sirt_method(A_torch, AT_torch, x, input_data, D, M, alpha)
-
-
-   # extracting crops
-   crop_x = extract_crops(ground_truth_1, ground_truth_3).detach().requires_grad_(True)
-   crop_x_sirt = extract_crops(x, ground_truth_3).detach().requires_grad_(True)
-
-
-   # test classifier
-   logits_img_true = class_model(crop_x)
-   digit_img_true = torch.softmax(logits_img_true, dim=1).argmax(dim=1)
-
-   logits_sirt = class_model(crop_x_sirt)
-   digit_sirt = torch.softmax(logits_sirt, dim=1).argmax(dim=1)
-
-   # save results
-   y_true_all.extend(labels.cpu().numpy().tolist())
-   y_pred_clean_all.extend(digit_img_true.cpu().numpy().tolist())
-   y_pred_sirt_all.extend(digit_sirt.cpu().numpy().tolist())
-
-   # checkpoint of batches
-   if (batch_id + 1) % 10 == 0:
-      print(f"Processed {batch_id + 1} batches")
+    mnist_clean = batch["ground_truth_small"].to(device)
+    mnist_sirt = batch["sirt_reconstructions"][-1].unsqueeze(1).to(device)
+    labels = batch["label"].to(device)
+    #                                                                                                                                                                                                          noise = batch["iteration_normalized"].to(device)
    
+    if noise_aware:
+        residual = mnist_sirt - mnist_clean
+        sigma_sirt = residual.flatten(1).std(dim=1, unbiased=False)
+        
+        noise_channel = 0.0 * torch.ones_like(mnist_clean[:, :1, :1, :1]).to(device)
+    
+        # test classifier
+        logits_img_true = class_model(mnist_clean,  noise_level=noise_channel)
+        digit_img_true = torch.softmax(logits_img_true, dim=1).argmax(dim=1)
+
+        logits_sirt = class_model(mnist_sirt, noise_level = sigma_sirt)
+        digit_sirt = torch.softmax(logits_sirt, dim=1).argmax(dim=1)
+
+    else:
+        # test classifier
+        logits_img_true = class_model(mnist_clean)
+        digit_img_true = torch.softmax(logits_img_true, dim=1).argmax(dim=1)
+
+        logits_sirt = class_model(mnist_sirt)
+        digit_sirt = torch.softmax(logits_sirt, dim=1).argmax(dim=1)
+
+    # save results
+    y_true_all.extend(labels.cpu().numpy().tolist())
+    y_pred_clean_all.extend(digit_img_true.cpu().numpy().tolist())
+    y_pred_sirt_all.extend(digit_sirt.cpu().numpy().tolist())
+
+    # checkpoint of batches
+    if (batch_id + 1) % 10 == 0:
+        print(f"Processed {batch_id + 1} batches")
+
 
 
 # Confusion Matrices

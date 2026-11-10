@@ -1,0 +1,51 @@
+2026-11-03 16:07:13,139 | INFO | Balanced training dataset label counts:
+2026-11-03 16:07:13,139 | INFO | Digit 0: 49
+2026-11-03 16:07:13,141 | INFO | Digit 1: 56
+2026-11-03 16:07:13,141 | INFO | Digit 2: 50
+2026-11-03 16:07:13,142 | INFO | Digit 3: 51
+2026-11-03 16:07:13,143 | INFO | Digit 4: 49
+2026-11-03 16:07:13,143 | INFO | Digit 5: 45
+2026-11-03 16:07:13,144 | INFO | Digit 6: 49
+2026-11-03 16:07:13,145 | INFO | Digit 7: 52
+2026-11-03 16:07:13,146 | INFO | Digit 8: 49
+2026-11-03 16:07:13,147 | INFO | Digit 9: 50
+/mhome/damtp/r/as3628/multi-task-learning/experiments/pipelines/pipeline_DPS.py:83: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load("/home/as3628/multi-task-learning/checkpoints/diffusion_model/model_39.pth", map_location="cpu")
+[I 2026-11-03 16:07:13,249] A new study created in memory with name: DPS_hyperparameter_search
+[I 2026-11-03 16:07:57,562] Trial 0 finished with value: 0.08257057799492032 and parameters: {'zeta_scale': 1.8614452232058895e-06, 'sigma_scale': 0.002751136940999179}.Best is trial 0 with value: 0.08257057799492032.
+[I 2026-11-03 16:08:41,541] Trial 1 finished with value: 0.1271104046454032 and parameters: {'zeta_scale': 0.0002119492146075929, 'sigma_scale': 0.09338346712349348}. Best is trial 1 with value: 0.1271104046454032.
+[I 2026-11-03 16:09:25,564] Trial 2 finished with value: 0.10430845585748709 and parameters: {'zeta_scale': 0.013501103899822833, 'sigma_scale': 0.04067789532486701}. Best is trial 1 with value: 0.1271104046454032.
+[I 2026-11-03 16:10:09,715] Trial 3 finished with value: 0.08256967538036405 and parameters: {'zeta_scale': 0.00019748661164593055, 'sigma_scale': 0.005736070394676533}.Best is trial 1 with value: 0.1271104046454032.
+[I 2026-11-03 16:10:53,819] Trial 4 finished with value: 0.6906696279843648 and parameters: {'zeta_scale': 0.08673870188661488, 'sigma_scale': 0.05733927746278934}. Bestis trial 4 with value: 0.6906696279843648.
+[I 2026-11-03 16:11:37,885] Trial 5 finished with value: 0.0825705555655683 and parameters: {'zeta_scale': 3.2696863939712964e-06, 'sigma_scale': 0.003019288244168174}. Best is trial 4 with value: 0.6906696279843648.
+[I 2026-11-03 16:12:21,919] Trial 6 finished with value: 0.0384519542043563 and parameters: {'zeta_scale': 0.0002505602109312289, 'sigma_scale': 0.33074394443103666}. Best is trial 4 with value: 0.6906696279843648.
+[I 2026-11-03 16:13:06,342] Trial 7 finished with value: 0.08403944124778112 and parameters: {'zeta_scale': 4.173147439589862e-05, 'sigma_scale': 0.04440607571591588}. Best is trial 4 with value: 0.6906696279843648.
+[I 2026-11-03 16:13:50,877] Trial 8 finished with value: 0.08257065148015195 and parameters: {'zeta_scale': 2.8781847695440013e-06, 'sigma_scale': 0.0010755555552450465}. Best is trial 4 with value: 0.6906696279843648.
+[I 2026-11-03 16:14:35,375] Trial 9 finished with value: 0.08256997971717889 and parameters: {'zeta_scale': 0.00021580706736977205, 'sigma_scale': 0.0023205882063821156}. Best is trial 4 with value: 0.6906696279843648.
+[I 2026-11-03 16:15:19,854] Trial 10 finished with value: 0.3363929890096188 and parameters: {'zeta_scale': 0.03200847141677463, 'sigma_scale': 0.0018419864347682551}. Best is trial 4 with value: 0.6906696279843648.
+[I 2026-11-03 16:16:04,008] Trial 11 finished with value: 0.42607818841934203 and parameters: {'zeta_scale': 0.03594316640860706, 'sigma_scale': 0.0016039988144627058}. Best is trial 4 with value: 0.6906696279843648.
+[I 2026-11-03 16:16:48,178] Trial 12 finished with value: 0.6986837575833003 and parameters: {'zeta_scale': 0.08782066505054083, 'sigma_scale': 0.015814097369627123}. Best is trial 12 with value: 0.6986837575833003.
+[I 2026-11-03 16:17:32,316] Trial 13 finished with value: 0.49111759215593337 and parameters: {'zeta_scale': 0.04162382493119635, 'sigma_scale': 0.014749322498223123}. Best is trial 12 with value: 0.6986837575833003.
+[I 2026-11-03 16:18:16,482] Trial 14 finished with value: 0.00157238149161761 and parameters: {'zeta_scale': 0.03338473640327931, 'sigma_scale': 0.5172597690040093}. Best is trial 12 with value: 0.6986837575833003.
+[I 2026-11-03 16:19:00,831] Trial 15 finished with value: 0.35528113854428134 and parameters: {'zeta_scale': 0.021399630103789813, 'sigma_scale': 0.11972927996309912}. Best is trial 12 with value: 0.6986837575833003.
+[I 2026-11-03 16:19:45,058] Trial 16 finished with value: 0.08268732560100034 and parameters: {'zeta_scale': 0.004663950903829497, 'sigma_scale': 0.009748680801827237}. Best is trial 12 with value: 0.6986837575833003.
+[I 2026-11-03 16:20:29,476] Trial 17 finished with value: 0.7090950657924017 and parameters: {'zeta_scale': 0.09295959900229107, 'sigma_scale': 0.08684175776720753}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:21:13,848] Trial 18 finished with value: 0.05780148588431378 and parameters: {'zeta_scale': 0.0017132990323810127, 'sigma_scale': 0.3142260181427965}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:21:58,096] Trial 19 finished with value: 0.1983921646916618 and parameters: {'zeta_scale': 6.651028882618946e-07, 'sigma_scale': 0.18523440003832298}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:22:42,583] Trial 20 finished with value: 0.11183557140951356 and parameters: {'zeta_scale': 0.0023403234396472696, 'sigma_scale': 0.06271078228135833}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:23:26,917] Trial 21 finished with value: 0.10952861791398998 and parameters: {'zeta_scale': 0.01699538998047069, 'sigma_scale': 0.03877055551370284}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:24:11,303] Trial 22 finished with value: 0.6278084029754003 and parameters: {'zeta_scale': 0.06684750087181614, 'sigma_scale': 0.04473697071056494}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:24:55,693] Trial 23 finished with value: 0.6884260515371958 and parameters: {'zeta_scale': 0.09842186277571788, 'sigma_scale': 0.11912581792018143}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:25:40,091] Trial 24 finished with value: 0.08255884235259145 and parameters: {'zeta_scale': 0.004314544775631014, 'sigma_scale': 0.002497928780481519}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:26:24,485] Trial 25 finished with value: 0.1631715681714316 and parameters: {'zeta_scale': 0.008184708878643936, 'sigma_scale': 0.25697108536557645}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:27:08,881] Trial 26 finished with value: 0.08271059604594484 and parameters: {'zeta_scale': 0.0017434749389099316, 'sigma_scale': 0.017792920495350216}.Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:27:53,265] Trial 27 finished with value: 0.5634959568579991 and parameters: {'zeta_scale': 0.05342505854158219, 'sigma_scale': 0.005299984833945161}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:28:37,395] Trial 28 finished with value: 0.08256871993653477 and parameters: {'zeta_scale': 1.2485357351476306e-06, 'sigma_scale': 0.012326191853213765}. Best is trial 17 with value: 0.7090950657924017.
+[I 2026-11-03 16:29:21,566] Trial 29 finished with value: 0.4925218880176544 and parameters: {'zeta_scale': 0.07954409489640041, 'sigma_scale': 0.22818673820286575}. Best is trial 17 with value: 0.7090950657924017.
+Best parameters:
+{'zeta_scale': 0.09295959900229107, 'sigma_scale': 0.08684175776720753}
+Best SSIM:
+0.7090950657924017
+Best parameters: {'zeta_scale': 0.09295959900229107, 'sigma_scale': 0.08684175776720753}
+
+

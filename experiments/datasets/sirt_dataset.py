@@ -54,7 +54,7 @@ name = "sirt_dataset_creation"
 os.makedirs(log_dir, exist_ok=True)
 
 # saving directory
-results_dir = "multi-task-learning/data/MNIST_sirt/"
+results_dir = "data/MNIST_sirt/"
 os.makedirs(results_dir, exist_ok=True)
 
 ## logger

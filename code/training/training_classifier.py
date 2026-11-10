@@ -15,6 +15,7 @@ from code.models.classifier import CNNClassifier
 from code.utils.logger import setup_logger
 from code.ct_recon.operators import ct_operator
 from code.ct_recon.SIRT import normalization_matrices, sirt_method
+from code.dataloader.dataset_creator import SIRTDataset
 from code.utils.image_cropping import extract_crops, insert_crop
 from accelerate import Accelerator
 from pathlib import Path
@@ -32,9 +33,9 @@ np.random.seed(seed)
 
 
 # PARAMETERS
-model_name = "cnn_classifier_mnist_sirt_time"
+model_name = "cnn_classifier_mnist_clean_best"
 batch_size = 128
-epochs = 1
+epochs = 30
 lr= 1e-3
 weight_decay = 1e-4
 accelerator = Accelerator()
@@ -57,7 +58,7 @@ sigma_data = 0.3
 noisy_images= False
 sigma_image= [0.1,0.4]
 sirt_images= True
-sirt_iterations = 10
+sirt_iterations = 20
 sirt_alpha= 10**4/(75.77664947509766)**2
 
 
@@ -67,7 +68,7 @@ name = "classifier_training"
 os.makedirs(log_dir, exist_ok=True)
 
 # saving directory
-results_dir = "multi-task-learning/checkpoints/classifier"
+results_dir = "checkpoints/classifier"
 os.makedirs(results_dir, exist_ok=True)
 
 ## logger
@@ -80,8 +81,16 @@ AT_torch = to_autograd(A.T, is_2d=True, num_extra_dims=2)
 
 
 # dataloader import
-train_dataloader, val_dataloader = import_data(True, True, n_train, None, A, num_angles, sigma_data, i_0, H, W, noisy_images,
-                sigma_image, sirt_images, sirt_iterations, sirt_alpha, batch_size, seed, logger, accelerator, device)
+if sirt_images:
+    train_dataset = SIRTDataset("data/MNIST_sirt/mnist_sirt_train.pt", noise_aware=noise_aware)
+    val_dataset = SIRTDataset("data/MNIST_sirt/mnist_sirt_train.pt",noise_aware=noise_aware)
+
+    train_dataloader = DataLoader( train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+else:
+    train_dataloader, val_dataloader = import_data(True, True, n_train, None, A, num_angles, sigma_data, i_0, H, W, noisy_images,
+                    sigma_image, sirt_images, sirt_iterations, sirt_alpha, batch_size, seed, logger, accelerator, device)
 
 
 def get_model_input(batch):
@@ -101,30 +110,17 @@ def get_model_input(batch):
 
     elif sirt_images:
         # List of tensors: one reconstruction per iteration.
-        reconstructions = batch["sirt_reconstructions"]
+        x = batch["sirt_reconstructions"]
 
-
-        # Each tensor has shape (B, H, W) and we need (B,1,H,W).
-        x = torch.cat(
-        [
-            reconstruction.float().to(device).unsqueeze(1)
-            if reconstruction.ndim == 3
-            else reconstruction.float().to(device)
-            for reconstruction in reconstructions
-        ],
-        dim=0)
-
-        # Repeat labels for each reconstruction.
-        num_reconstructions = len(reconstructions)
-        y = y.repeat(num_reconstructions)
+        # Add channel dimension if necessary
+        if x.ndim == 3:
+            x = x.unsqueeze(1)
 
         noise_level = None
 
         if noise_aware:
-            iteration_levels = batch["iteration_normalized"]
-
-            levels = torch.stack([ torch.as_tensor(level, dtype=torch.float32, device=device) for level in iteration_levels])
-            noise_level = levels.reshape(-1, 1)
+            noise_level = batch["iteration_normalized"]
+            noise_level = torch.as_tensor(noise_level,dtype=torch.float32, device=device).reshape(-1, 1)
 
     else:
         x = batch["ground_truth_small"]
@@ -174,11 +170,7 @@ def save_history(history):
 
 # TRAINING STEP
 def classification_step(model, batch, loss_fn):
-    t0 = time.perf_counter()
     x, y, noise_level = get_model_input(batch)
-    t1 = time.perf_counter()
-
-    print(f"Tiempo get_model_input: {t1 - t0:.6f} segundos")
 
     if noise_aware:
         logits = model(x, noise_level=noise_level)
@@ -202,34 +194,16 @@ def train_one_epoch(model, loader, optimizer, loss_fn):
     total_correct = 0
     total_samples = 0
 
-    iterator = iter(loader)
-
-    for batch_idx in range(len(loader)):
-        t0 = time.perf_counter()
-        batch = next(iterator)
-        t1 = time.perf_counter()
-
-        print(f"Data loading: {t1 - t0:.6f} segundos")
+    for batch in loader:
 
         optimizer.zero_grad()
         loss, correct, n = classification_step(model, batch, loss_fn)
         total_correct += correct
 
-        torch.cuda.synchronize()
-        t2 = time.perf_counter()
-
         loss.backward()
 
-        torch.cuda.synchronize()
-        t3 = time.perf_counter()
-
         optimizer.step()
-
-        torch.cuda.synchronize()
-        t4 = time.perf_counter()
-
-        print(f"Backward: {t3 - t2:.6f} segundos")
-        print(f"Optimizer: {t4 - t3:.6f} segundos")
+        
 
         total_loss += loss.item() * n
         total_samples += n
@@ -237,9 +211,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn):
     avg_loss = total_loss / total_samples
     avg_metric = total_correct / total_samples
 
-    t1 = time.perf_counter()
-
-    print(f"Tiempo train_one_epoch: {t1 - t0:.6f} segundos")
+    
     return avg_loss, avg_metric
 
 

@@ -92,6 +92,9 @@ class CNNClassifier(nn.Module):
                 raise ValueError(
                     "noise_level is required when noise_aware=True"
                 )
+            
+            # Ensure noise_level has the same dtype and device as x
+            noise_level = noise_level.to(device=x.device, dtype=x.dtype)
 
             # One noise per image in the batch
             if noise_level.ndim == 1:
@@ -99,9 +102,7 @@ class CNNClassifier(nn.Module):
 
             # noise is a constant channel
             noise_channel = noise_level.reshape(-1, 1, 1, 1)
-            noise_channel = noise_channel.expand(
-                -1, 1, x.shape[2], x.shape[3]
-            )
+            noise_channel = noise_channel.expand(-1, 1, x.shape[2], x.shape[3])
 
             x = torch.cat([x, noise_channel], dim=1)
 
